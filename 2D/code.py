@@ -30,6 +30,7 @@ Available settings to choose from :
         - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
         - Aux Loss Free Load Balancing               (aux_free = True)  
 '''
+
 import warnings; warnings.filterwarnings('ignore')
 import math
 import inspect
@@ -349,6 +350,9 @@ class ColumnParallelLinear(nn.Module):
             return full_output
         return local_output
 
+
+
+
 class RowParallelLinear(nn.Module):
     """Shard the weight matrix along input dimension (row-wise)"""
     def __init__(self, in_features, out_features, bias=True, input_is_parallel=False, group=None):
@@ -375,7 +379,6 @@ class RowParallelLinear(nn.Module):
         return local_output
 
 
-# done implementation
 
 
 
@@ -1934,15 +1937,6 @@ if master_process:
 
 #___________CREATE YOUR MODEL_____________
 
-# fsdp_wrap_policy = ModuleWrapPolicy({Block})
-
-# mp_policy = MixedPrecision(
-#     param_dtype=torch_dtype,
-#     reduce_dtype=torch_dtype,
-#     buffer_dtype=torch_dtype,
-# )
-
-# model = LLM(ModelConfig , tp_group=tp_group).to(device)
 
 # 4. Continue with model creation and training
 model = LLM(ModelConfig, tp_group=topology["tp_group"]).to(device)
@@ -1953,17 +1947,13 @@ if topology["is_global_leader"]:
     if model.print_fused_adamw: print("Using Fused AdamW")
     if model.print_act_recomp: print("Using Activation Recomputation")
 
-# Compile model
-# if topology["is_global_leader"]: print("Using compiled model")
-# model = torch.compile(model)
+
 # Compile model
 if topology["is_global_leader"]: 
     print("Using compiled model")
     model = torch.compile(model)
 
 
-# (optional) compile
-# model = torch.compile(model)
 
 
 # Wrap with DDP
@@ -2137,14 +2127,48 @@ if master_process : print("Using compiled model")
 #     device=device
 # )
 
+# After model creation, BEFORE training loop:
+if not run_integration_checks(model, topology, train_loader, B, T, device):
+    print("❌ Distributed setup failed - aborting!")
+    exit(1)
+
+
+
 # Initialize scaler
 scaler = torch.cuda.amp.GradScaler()
 
 # Import contextlib for no_sync
 import contextlib
 
+available_sequences = train_loader.shard_size - train_loader.T
+batches_per_epoch_micro = max(available_sequences // train_loader.B, 1)
+
+if topology["is_global_leader"]:
+    print(f"📊 Epoch calculation:")
+    print(f"   - Shard size: {train_loader.shard_size} tokens")
+    print(f"   - Available sequences: {available_sequences}") 
+    print(f"   - Micro-batches per epoch: {batches_per_epoch_micro}")
+    print(f"   - Gradient accumulation steps: {grad_accum_steps}")
+
+
+current_epoch = 0
+train_loader.set_epoch(current_epoch)
+
+
 for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
+
+    # 🔥 CORRECT: Track epoch based on actual data consumption
+    global_micro = iter * grad_accum_steps
+    new_epoch = global_micro // batches_per_epoch_micro
+    
+    # Only update epoch when it actually changes
+    if new_epoch != current_epoch:
+        current_epoch = new_epoch
+        train_loader.set_epoch(current_epoch)
+        if topology["is_global_leader"]:
+            print(f"🔄 Epoch {current_epoch} - Reseeding data loader")
+
 
     lr = get_lr(iter, TrainingConfig)
     for param_grp in optimizer.param_groups:
