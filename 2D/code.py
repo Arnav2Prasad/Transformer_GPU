@@ -46,6 +46,12 @@ from dataclasses import dataclass
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def unwrap_model(model):
+    """Safely unwrap DDP-wrapped model to access underlying methods"""
+    return model.module if isinstance(model, DDP) else model
+
 
 
 # =====2D====
@@ -64,7 +70,12 @@ def verify_data_broadcasting(topology, train_loader, B, T, device):
             x = torch.empty(B, T, dtype=torch.long, device=device)
             y = torch.empty(B, T, dtype=torch.long, device=device)
         
-        x, y = broadcast_batch_tp(x, y, topology["tp_group"], 0)
+
+        # ✅ FIXED: Use correct global source rank
+        tp_group = topology["tp_group"]
+        src_global = topology["tp_group_ranks"][0]
+
+        x, y = broadcast_batch_tp(x, y, tp_group, src_global)
 
         # GPU-only checksum: device-side, 64-bit (no Python int round-trip)
         batch_hash = x.to(torch.int64).sum().unsqueeze(0)  # shape [1], device=cuda
@@ -440,6 +451,7 @@ class LLMconfig:
         x_out = torch.stack([x_re_out, x_im_out], dim=-1).flatten(3) # (B, T, H, hs//2), (B, T, H, hs//2) -> (B, T, H, hs)
 
         return x_out.type_as(x)
+
 
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
@@ -1404,8 +1416,84 @@ assert torch.cuda.device_count() > 1
 
 # ----------
 
+# def init_dp_tp_topology(tp_size: int = None):
+#     """Initialize DP × TP topology with orthogonal groups"""
+#     assert dist.is_initialized(), "Distributed must be initialized first"
+    
+#     world_size = dist.get_world_size()
+#     global_rank = dist.get_rank()
+    
+#     # Set TP size with better defaults
+#     if tp_size is None:
+#         # Sensible default: use 2-way TP for multi-GPU, fallback to world_size for single GPU
+#         tp_size = min(world_size, 2) if world_size > 1 else 1
+    
+#     assert world_size % tp_size == 0, \
+#         f"world_size={world_size} must be divisible by tp_size={tp_size}"
+    
+#     dp_size = world_size // tp_size
+    
+#     # Calculate ranks
+#     tp_rank = global_rank % tp_size
+#     dp_rank = global_rank // tp_size
+    
+#     # Initialize group variables with None for safety
+#     my_tp_group = None
+#     my_dp_group = None
+    
+#     # Create TP groups (contiguous ranks: [0,1,2,3], [4,5,6,7], ...)
+#     tp_groups = []
+#     for dp_idx in range(dp_size):
+#         tp_ranks = list(range(dp_idx * tp_size, (dp_idx + 1) * tp_size))
+#         tp_group = dist.new_group(ranks=tp_ranks)
+#         tp_groups.append(tp_group)
+#         if dp_idx == dp_rank:
+#             my_tp_group = tp_group
+    
+#     # Create DP groups (strided ranks: [0,4,8,...], [1,5,9,...], ...)
+#     dp_groups = []
+#     for tp_idx in range(tp_size):
+#         dp_ranks = list(range(tp_idx, world_size, tp_size))
+#         dp_group = dist.new_group(ranks=dp_ranks)
+#         dp_groups.append(dp_group)
+#         if tp_idx == tp_rank:
+#             my_dp_group = dp_group
+    
+#     # CRITICAL: Verify groups were created successfully
+#     assert my_tp_group is not None, "Failed to create local TP group"
+#     assert my_dp_group is not None, "Failed to create local DP group"
+    
+#     # Leadership flags
+#     is_global_leader = (global_rank == 0)
+#     is_dp_leader = (dp_rank == 0)      
+#     is_tp_leader = (tp_rank == 0)      
+    
+#     # Barrier for cluster stability
+#     dist.barrier()
+    
+#     if is_global_leader:
+#         print(f"DP×TP Topology: {dp_size} × {tp_size} (DP × TP)")
+#         print(f"  - TP groups: {dp_size} groups of {tp_size} devices")
+#         print(f"  - DP groups: {tp_size} groups of {dp_size} devices")
+#         print(f"  - World size: {world_size}, Global rank: {global_rank}")
+    
+#     return {
+#         "world_size": world_size,
+#         "global_rank": global_rank,
+#         "tp_size": tp_size,
+#         "tp_rank": tp_rank, 
+#         "tp_group": my_tp_group,
+#         "dp_size": dp_size,
+#         "dp_rank": dp_rank,
+#         "dp_group": my_dp_group,
+#         "is_global_leader": is_global_leader,
+#         "is_dp_leader": is_dp_leader,
+#         "is_tp_leader": is_tp_leader,
+#     }
+
+
 def init_dp_tp_topology(tp_size: int = None):
-    """Initialize DP × TP topology with orthogonal groups"""
+    """Initialize DP × TP topology with orthogonal groups - UPDATED"""
     assert dist.is_initialized(), "Distributed must be initialized first"
     
     world_size = dist.get_world_size()
@@ -1413,7 +1501,6 @@ def init_dp_tp_topology(tp_size: int = None):
     
     # Set TP size with better defaults
     if tp_size is None:
-        # Sensible default: use 2-way TP for multi-GPU, fallback to world_size for single GPU
         tp_size = min(world_size, 2) if world_size > 1 else 1
     
     assert world_size % tp_size == 0, \
@@ -1428,6 +1515,7 @@ def init_dp_tp_topology(tp_size: int = None):
     # Initialize group variables with None for safety
     my_tp_group = None
     my_dp_group = None
+    my_tp_group_ranks = []  # NEW: Store global ranks for TP group
     
     # Create TP groups (contiguous ranks: [0,1,2,3], [4,5,6,7], ...)
     tp_groups = []
@@ -1437,6 +1525,7 @@ def init_dp_tp_topology(tp_size: int = None):
         tp_groups.append(tp_group)
         if dp_idx == dp_rank:
             my_tp_group = tp_group
+            my_tp_group_ranks = tp_ranks[:]  # NEW: Store the global ranks
     
     # Create DP groups (strided ranks: [0,4,8,...], [1,5,9,...], ...)
     dp_groups = []
@@ -1471,6 +1560,7 @@ def init_dp_tp_topology(tp_size: int = None):
         "tp_size": tp_size,
         "tp_rank": tp_rank, 
         "tp_group": my_tp_group,
+        "tp_group_ranks": my_tp_group_ranks,  # NEW: Add this
         "dp_size": dp_size,
         "dp_rank": dp_rank,
         "dp_group": my_dp_group,
@@ -1479,19 +1569,35 @@ def init_dp_tp_topology(tp_size: int = None):
         "is_tp_leader": is_tp_leader,
     }
 
+local_rank = int(os.environ['LOCAL_RANK'])
+torch.cuda.set_device(local_rank)
+device = torch.device("cuda", local_rank)
+
 
 # ______________DEVICE, DTYPE, DDP SETUP_________________
 
 init_process_group(backend='nccl')
+
+# # Add this after topology initialization for debugging
+# if topology["is_global_leader"]:
+#     print("My TP group ranks:", topology["tp_group_ranks"])
+#     print(f"[global {topology['global_rank']}] tp_rank={topology['tp_rank']} dp_rank={topology['dp_rank']}")
+
+# Expected output:
+# My TP group ranks: [0, 1]  (for global rank 0)
+# [global 0] tp_rank=0 dp_rank=0
+# [global 1] tp_rank=1 dp_rank=0  
+# [global 2] tp_rank=0 dp_rank=1
+# [global 3] tp_rank=1 dp_rank=1
 
 rank = int(os.environ['RANK'])
 local_rank = int(os.environ['LOCAL_RANK'])
 world_size = int(os.environ['WORLD_SIZE'])
 
 
-# Set device
-torch.cuda.set_device(local_rank)
-device = torch.device("cuda", local_rank)
+# # Set device
+# torch.cuda.set_device(local_rank)
+# device = torch.device("cuda", local_rank)
 
 
 master_process = rank == 0
@@ -1533,9 +1639,7 @@ world_size = int(os.environ['WORLD_SIZE'])
 
 # device = f"cuda:{local_rank}"
 
-# Correct approach
-torch.cuda.set_device(local_rank)  # Integer
-device = torch.device("cuda", local_rank)  # Proper device object
+
 
 master_process = rank == 0
 if master_process : print(f"Num GPUs = {world_size}")
@@ -1701,8 +1805,8 @@ def init_distributed():
     world_size = dist.get_world_size()
     
     # Set device correctly
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
+    # torch.cuda.set_device(local_rank)
+    # device = torch.device("cuda", local_rank)
     
     return {
         "rank": rank,
@@ -1841,12 +1945,23 @@ class DataLoader:
 
 
 # Broadcast function to ensure all ranks have same data
-def broadcast_batch(x, y, src=0):
-    """Ensure all TP ranks have the same batch"""
-    if dist.is_initialized():
-        dist.broadcast(x, src=src)
-        dist.broadcast(y, src=src)
+# def broadcast_batch(x, y, src=0):
+#     """Ensure all TP ranks have the same batch"""
+#     if dist.is_initialized():
+#         dist.broadcast(x, src=src)
+#         dist.broadcast(y, src=src)
+#     return x, y
+
+def broadcast_batch_tp(x, y, tp_group, src_global):
+    """Broadcast batch within TP group from a GLOBAL source rank - CORRECTED"""
+    if dist.is_initialized() and tp_group is not None:
+        dist.broadcast(x, src=src_global, group=tp_group)
+        dist.broadcast(y, src=src_global, group=tp_group)
     return x, y
+
+
+
+ 
 
 
 
@@ -1869,17 +1984,31 @@ def broadcast_batch_tp(x, y, tp_group, src_in_group=0):
         dist.broadcast(y, src=src_in_group, group=tp_group)
     return x, y
 
+# def get_next_batch(train_loader, topology, B, T, device):
+#     """Get next batch with TP-aware broadcasting"""
+#     if topology["is_tp_leader"]:  # Only TP leader loads data per model replica
+#         x, y = train_loader.next_batch()
+#     else:
+#         # Other TP shards allocate empty tensors
+#         x = torch.empty(B, T, dtype=torch.long, device=device)
+#         y = torch.empty(B, T, dtype=torch.long, device=device)
+    
+#     # Broadcast within TP group so all shards of same model replica get same data
+#     x, y = broadcast_batch_tp(x, y, topology["tp_group"], src_in_group=0)
+#     return x, y
+
 def get_next_batch(train_loader, topology, B, T, device):
-    """Get next batch with TP-aware broadcasting"""
-    if topology["is_tp_leader"]:  # Only TP leader loads data per model replica
+    if topology["is_tp_leader"]:
         x, y = train_loader.next_batch()
     else:
-        # Other TP shards allocate empty tensors
         x = torch.empty(B, T, dtype=torch.long, device=device)
         y = torch.empty(B, T, dtype=torch.long, device=device)
     
-    # Broadcast within TP group so all shards of same model replica get same data
-    x, y = broadcast_batch_tp(x, y, topology["tp_group"], src_in_group=0)
+    # ✅ Get TP group and leader's GLOBAL rank
+    tp_group = topology["tp_group"]
+    src_global = topology["tp_group_ranks"][0]  # Leader's GLOBAL rank
+    
+    x, y = broadcast_batch_tp(x, y, tp_group, src_global)
     return x, y
 
 
@@ -1941,11 +2070,11 @@ if master_process:
 # 4. Continue with model creation and training
 model = LLM(ModelConfig, tp_group=topology["tp_group"]).to(device)
 
-if topology["is_global_leader"]: 
-    total, active = model.get_num_params()
-    print(f"total parameters = {total:,}, active parameters = {active:,}")
-    if model.print_fused_adamw: print("Using Fused AdamW")
-    if model.print_act_recomp: print("Using Activation Recomputation")
+# if topology["is_global_leader"]: 
+#     total, active = model.get_num_params()
+#     print(f"total parameters = {total:,}, active parameters = {active:,}")
+#     if model.print_fused_adamw: print("Using Fused AdamW")
+#     if model.print_act_recomp: print("Using Activation Recomputation")
 
 
 # Compile model
@@ -2055,6 +2184,7 @@ else:
 
 
 # 6) Use base_model for model-specific attributes/logging
+base_model = unwrap_model(model)
 total, active = base_model.get_num_params()
 if master_process:
     print(f"total parameters = {total:,}, acitive parameters = {active:,}")
@@ -2083,10 +2213,12 @@ for micro_step in range(grad_accum_steps):
 
 
 if master_process : 
-    total, active = model.get_num_params()
+    # total, active = model.get_num_params()
+    base_model = unwrap_model(model)
+    total, active = base_model.get_num_params()
     print(f"total parameters = {total:,}, acitive parameters = {active:,}")
-    if model.print_fused_adamw: print("Using Fused AdamW")
-    if model.print_act_recomp: print("Using Activation Recomputation")
+    if base_model.print_fused_adamw: print("Using Fused AdamW")
+    if base_model.print_act_recomp: print("Using Activation Recomputation")
 
 # model = FSDP(
 #     model,
