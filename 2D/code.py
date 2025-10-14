@@ -1147,6 +1147,8 @@ class MoE(nn.Module):
         y = (shared_output + routed_output).view(B, T, C)
         return y, aux_loss
 
+        
+
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
     def __init__(self, config:LLMconfig , tp_group = None):
