@@ -1777,6 +1777,12 @@ def get_lr(iter, TrainingConfig:Trainconfig):
         coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
 
+
+dtype = 'float16' # if not torch.cuda.is_bf16_supported else 'bfloat16'
+ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype))
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
+
+
 @torch.no_grad()
 def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
     out = {}
