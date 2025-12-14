@@ -55,7 +55,7 @@ from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
 
 from config_code import LLMconfig
-
+from llm_code import LLM
 
 
 class EPLayout:
