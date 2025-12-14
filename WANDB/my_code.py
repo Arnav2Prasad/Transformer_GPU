@@ -112,15 +112,6 @@ from llm_code import MLP, Block, Attention, GQA, LLM, MoE, Expert
 
 
 
-
-
-
-
-
-    
-
-
-
 if tp_code == 1:
     assert torch.cuda.device_count() > 1
 
