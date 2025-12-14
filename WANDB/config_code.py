@@ -83,7 +83,7 @@ print('ddp_flag : ', ddp_flag)
 print('------')
 
 
-tp_code = 2
+tp_code = 1
 print('1 for TP')
 print('2 for No TP')
 
@@ -93,7 +93,7 @@ print('1 for EP')
 print('2 for No EP')
 
 
-cp_code = 1
+cp_code = 2
 print('1 for CP')
 print('2 for No CP')
 
@@ -1784,24 +1784,17 @@ scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 
 @torch.no_grad()
-def estimate_loss(model: LLM, TrainingConfig: Trainconfig, train_loader: DataLoader, val_loader: DataLoader):
+def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
     out = {}
-    model.eval()
-    model.VAL_RUN = True
-    
-    # Create autocast context INSIDE the no_grad context
-    autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype))
-    
-    with torch.no_grad(), torch._dynamo.disable(), autocast_ctx:
-        for split, loader in [('train', train_loader), ('val', val_loader)]:
-            losses = torch.zeros(TrainingConfig.eval_iters)
-            for k in range(TrainingConfig.eval_iters):
-                X, Y = loader.next_batch()
+    model.eval() ; model.VAL_RUN = True
+    for split, loader in [('train', train_loader), ('val', val_loader)]:
+        losses = torch.zeros(TrainingConfig.eval_iters)
+        for k in range(TrainingConfig.eval_iters):
+            X, Y = loader.next_batch() # Data is now moved to device in next_batch()
+            with ctx:
                 _, loss, _ = model(X, Y)
-                losses[k] = loss.item()
-            out[split] = losses.mean()
-    
-    model.train()
-    model.VAL_RUN = False
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train(); model.VAL_RUN = False
     return out
 
