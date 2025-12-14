@@ -44,7 +44,7 @@ print('merging_code : ',merging_code)
     
 # 1 for DP
 # 2 for FSDP
-ddp_flag = 2
+ddp_flag = 1
 print('1 for DP')
 print('2 for FSDP')
 print('------')
@@ -59,7 +59,7 @@ print('1 for TP')
 print('2 for No TP')
 
 
-ep_code = 2
+ep_code = 1
 print('1 for EP')
 print('2 for No EP')
 
