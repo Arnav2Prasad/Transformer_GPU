@@ -166,7 +166,7 @@ ModelConfig = LLMconfig(
     pos_emb = 'rope',
     
     # MoE
-    moe = True,
+    moe = False,
 
     up_dim = 512, 
     non_linearity = 'swiglu',  
