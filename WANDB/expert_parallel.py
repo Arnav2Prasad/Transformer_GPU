@@ -439,7 +439,8 @@ def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
         T = model_config_copy.block_size
         assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
         grad_accum_steps = total_batch_size // (B * T)
-        use_wandb = not TrainingConfig.no_wandb and local_rank == 0
+        # use_wandb = not TrainingConfig.no_wandb and local_rank == 0
+        use_wandb = not args.no_wandb and local_rank == 0
         if use_wandb:
             if not TrainingConfig.wandb_run_name:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
