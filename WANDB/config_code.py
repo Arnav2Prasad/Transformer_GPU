@@ -1819,6 +1819,7 @@ class MoE(nn.Module):
         
         # combine to output
         y = (shared_output + routed_output).view(B, T, C)
+        print(' the function forward_single_gpu has returned')
         return y, aux_loss
 
 
