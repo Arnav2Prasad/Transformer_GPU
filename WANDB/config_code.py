@@ -1725,7 +1725,7 @@ class MoE(nn.Module):
         # Short-circuit for single GPU
         if tp_code == 1:
             print('hehehehehehehheheheh')
-            return self.tp_forward(self,x)
+            return self.tp_forward(x)
 
         # Early return for shared-only layers
         if self.shared_only:
