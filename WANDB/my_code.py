@@ -103,10 +103,10 @@ from zero2_code import ZeRO2GradientHandler, ZeRO2Optimizer
 
 from context_parallel import all_gather_sequence
 
-from expert_parallel import EPLayout, create_worker_model, find_latest_checkpoint, save_checkpoint, load_checkpoint, finalize_training, setup_ep_groups, main_worker
+from expert_parallel import create_worker_model, find_latest_checkpoint, save_checkpoint, load_checkpoint, finalize_training, setup_ep_groups, main_worker
 
 
-from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, EPLayout
 from llm_code import MLP, Block, Attention, GQA, LLM, MoE, Expert
 
 

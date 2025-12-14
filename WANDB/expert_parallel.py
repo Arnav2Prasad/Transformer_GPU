@@ -58,53 +58,6 @@ from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp
 from llm_code import LLM
 
 
-class EPLayout:
-    """Manages expert distribution across EP ranks"""
-    def __init__(self, n_routed, world_size, rank):
-       
-
-        # Total number of routed experts
-        self.n_routed = n_routed
-
-
-        # Total number of GPUs
-        self.world_size = world_size
-
-
-        # Current GPU rank (0, 1, 2, ...)
-        self.rank = rank
-
-        '''
-        Uses ceil() to ensure all experts are assigned, even if not perfectly divisible
-        Example: 10 experts, 3 GPUs → ceil(10/3) = 4 experts per GPU
-        '''
-        self.n_local = ceil(n_routed / world_size)
-
-        # First expert on this GPU
-        self.start = self.n_local * rank
-
-
-        # Last expert (+1)
-        self.end = min(self.start + self.n_local, n_routed)
-
-        # Local expert IDs
-        self.local_global_ids = list(range(self.start, self.end))
-
-
-    
-    # Find Expert Owner
-    # Given a global expert ID, find which GPU owns it
-    def owner_rank(self, gid: int) -> int:
-        return min(gid // self.n_local, self.world_size - 1)
-
-
-    # Convert to Local Index
-    # Convert global expert ID to local index within GPU
-    def local_index(self, gid: int) -> int:
-        return gid - self.start
-
-
-
 
 
 
