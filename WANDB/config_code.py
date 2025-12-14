@@ -1816,6 +1816,7 @@ class MoE(nn.Module):
         print('before for loop')
 
         for i in range(self.n_routed):
+            print('n_routed : ',self.n_routed)
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
             if token_indices.numel() > 0:
                 print('inside if token_indices.numel() > 0:')
@@ -1827,6 +1828,7 @@ class MoE(nn.Module):
                 
                 weighted_output = expert_output * gates_for_expert
                 routed_output.index_add_(0, token_indices, weighted_output)
+                print('finished  if  token_indices.numel() > 0:')
         
         # combine to output
         y = (shared_output + routed_output).view(B, T, C)
