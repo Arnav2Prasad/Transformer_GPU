@@ -57,6 +57,7 @@ from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, DataLoader
 from llm_code import LLM
 
+from utils_code import get_lr, estimate_loss
 
 
 
