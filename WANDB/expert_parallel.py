@@ -54,7 +54,7 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
 
-from config_code import LLMconfig
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code
 from llm_code import LLM
 
 
@@ -470,7 +470,7 @@ def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
         # Different model creation for rank 0 vs workers
         if local_rank == 0:
             # Rank 0: full model
-            model = LLM(model_config_copy).to(device)
+            model = LLM(model_config_copy, tp_code=tp_code, merging_code=merging_code, ep_code=ep_code).to(device)
             train_loader = DataLoader(B=TrainingConfig.batch_size, T=model_config_copy.block_size, 
                                     file_path="train.bin", device=device)
             total, active = model.get_num_params()

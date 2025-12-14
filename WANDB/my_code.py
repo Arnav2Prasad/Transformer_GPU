@@ -30,43 +30,7 @@ import wandb
 from datetime import datetime
 import glob  # <-- MISSING
 import gc    # <-- MISSING
-# 1 for plain DP
-# 2 for zero1
-# 3 for zero2
-merging_code = 3
-print('1 for plain DP')
-print('2 for zero1')
-print('3 for zero2')
-print('------')
-print('merging_code : ',merging_code)
 
-
-    
-# 1 for DP
-# 2 for FSDP
-ddp_flag = 1
-print('1 for DP')
-print('2 for FSDP')
-print('------')
-
-
-print('ddp_flag : ', ddp_flag)
-print('------')
-
-
-tp_code = 2
-print('1 for TP')
-print('2 for No TP')
-
-
-ep_code = 1
-print('1 for EP')
-print('2 for No EP')
-
-
-cp_code = 2
-print('1 for CP')
-print('2 for No CP')
 
 
 import math
@@ -142,7 +106,7 @@ from context_parallel import all_gather_sequence
 from expert_parallel import EPLayout, create_worker_model, find_latest_checkpoint, save_checkpoint, load_checkpoint, finalize_training, setup_ep_groups, main_worker
 
 
-from config_code import LLMconfig
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code
 
 
 

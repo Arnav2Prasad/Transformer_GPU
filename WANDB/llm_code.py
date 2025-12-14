@@ -53,14 +53,16 @@ from torch.distributed.fsdp import StateDictType, FullStateDictConfig
 from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
-from config_code import LLMconfig
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code
 
 
 
 
 class LLM(nn.Module):
     """ A simple Large language model """
-    def __init__(self, config:LLMconfig , tp_group=None):
+    # def __init__(self, config:LLMconfig , tp_group=None, tp_code):
+    def __init__(self, config: LLMconfig, tp_group=None, tp_code=0, merging_code=1, ep_code=0):
+    
         super().__init__()
         self.config = config
 
@@ -117,36 +119,6 @@ class LLM(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    # def get_num_params(self):
-    #     """Returns the total number of parameters and active parameters in the model."""
-    #     n_params = sum(p.numel() for p in self.parameters())
-        
-    #     active_params = 0
-
-    #     active_params += self.tkn_emb.weight.numel()      # embeddings
-    #     if self.config.pos_emb == 'learn': active_params += self.pos_emb.weight.numel()
-    #     active_params += self.transformer.ln_f.weight.numel() + self.transformer.ln_f.bias.numel()
-
-    #     for block in self.transformer.h:
-    #         active_params += sum(p.numel() for p in block.attn.parameters())   # ----|
-    #         active_params += sum(p.numel() for p in block.ln1.parameters())    #     |---> Always active
-    #         active_params += sum(p.numel() for p in block.ln2.parameters())    # ----|
-
-    #         if hasattr(block,'is_moe') and block.is_moe:
-
-    #             active_params += sum(p.numel() for p in block.moe.gate.parameters())                # ----|
-    #             for i in range(block.moe.n_shared):                                                 #     |---> Always active
-    #                 active_params += sum(p.numel() for p in block.moe.experts[i].parameters())      # ----|
-
-    #             if block.moe.n_routed > 0:
-    #                 # Calculate params for one routed expert, multiply by the number of active ones
-    #                 params_per_routed_expert = sum(p.numel() for p in block.moe.experts[block.moe.n_shared].parameters())
-    #                 active_params += block.moe.n_act_routed * params_per_routed_expert
-            
-    #         else: # In case a block is not MoE
-    #             active_params += sum(p.numel() for p in block.mlp.parameters())
-
-    #     return n_params, active_params
 
     def get_num_params(self):
         """Returns the total number of parameters and active parameters in the model."""
