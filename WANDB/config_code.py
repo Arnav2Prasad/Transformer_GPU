@@ -369,7 +369,7 @@ def all_gather_sequence(tensor: torch.Tensor, dim: int, group=None) -> torch.Ten
     
     return out
 
-    
+
 
 
 
@@ -509,18 +509,43 @@ class ZeRO2GradientHandler:
                               group=self.process_group)
                 
                 # Unflatten back to parameters (only on owning rank)
+                # if self.rank == rank:           # If I am the owner of these parameters
+                #     offset = 0
+                #     for p in params:
+                #         numel = p.numel()           # Number of elements in this parameter
+                #         p.grad.data.copy_(
+                #             grad_buffer[offset:offset + numel].view_as(p.data)
+                #         )
+                #         offset += numel
+                # else:
+                #     # Non-owning ranks can discard gradients
+                #     for p in params:
+                #         p.grad = None
+                # Unflatten back to parameters (only on owning rank)
                 if self.rank == rank:           # If I am the owner of these parameters
                     offset = 0
                     for p in params:
-                        numel = p.numel()           # Number of elements in this parameter
-                        p.grad.data.copy_(
-                            grad_buffer[offset:offset + numel].view_as(p.data)
-                        )
-                        offset += numel
+                        if p.requires_grad:
+                            numel = p.numel()
+                            
+                            # Ensure gradient exists
+                            if p.grad is None:
+                                p.grad = torch.zeros_like(p.data)
+                            
+                            # Copy from buffer
+                            p.grad.data.copy_(
+                                grad_buffer[offset:offset + numel].view_as(p.data)
+                            )
+                            offset += numel
+                        else:
+                            # For non-trainable parameters, still count their size in buffer
+                            offset += p.numel()
                 else:
-                    # Non-owning ranks can discard gradients
+                    # Non-owning ranks
                     for p in params:
-                        p.grad = None
+                        # Only clear gradients for trainable parameters
+                        if p.requires_grad:
+                            p.grad = None
 
             '''
             What happens:
