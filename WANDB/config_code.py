@@ -1830,6 +1830,8 @@ class MoE(nn.Module):
                 routed_output.index_add_(0, token_indices, weighted_output)
                 print('finished  if  token_indices.numel() > 0:')
         
+
+        print('before y = (shared_output + routed_output).view(B, T, C)')
         # combine to output
         y = (shared_output + routed_output).view(B, T, C)
         print(' the function forward_single_gpu has returned')
