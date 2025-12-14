@@ -1307,7 +1307,7 @@ scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 @dataclass
 class Trainconfig:
-    wandb_run_name : str
+    wandb_run_name : str | None = None
     dataset : str | Literal['shakespeare', 'tinystories', 'fineweb']
     total_batch_size : int
     batch_size : int
