@@ -885,7 +885,10 @@ else:
         scaler.update()    
 
         if master_process:
-            torch.cuda.synchronize()
+            print('in line 888 : if master_process')
+            print('before torch.cuda.synchronize() ')
+            torch.cuda.synchronize()  
+            print('after torch.cuda.synchronize()')  
             dt  = (perf_counter()-t0)*1000
             print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
 
