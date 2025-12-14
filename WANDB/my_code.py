@@ -511,6 +511,7 @@ elif tp_code == 1:
     optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 
     # Initialize scaler (add this if missing)
+    print('inside elif tp_code == 1: : Line 514')
     scaler = torch.cuda.amp.GradScaler()
 
 
@@ -794,6 +795,7 @@ if ep_code == 1:
 
 else:
     if tp_code == 1:
+        print('inside tp_code == 1 ; under master_process')
         if master_process:
             x, y = train_loader.next_batch()
         else:
@@ -807,6 +809,7 @@ else:
 
 
     loss_stats = []
+    print('at line 811 : loss_stats = [] loss_stats = []')
     for iter in range(TrainingConfig.max_iters+1):
         t0 = perf_counter()
 
