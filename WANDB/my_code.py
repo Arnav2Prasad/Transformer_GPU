@@ -1,4 +1,3 @@
-%%writefile my_code.py
 
 '''
 This script builds an LLM model based on the user's CLI inputs.
