@@ -1525,14 +1525,16 @@ class MoE(nn.Module):
             print('now calling : self.forward_single_gpu(x)')
             return self.forward_single_gpu(x)
 
-        # Early return for shared-only layers
-        if self.shared_only:
-            return self._forward_shared_only(x)
-        
         # Short-circuit for single GPU
         if not self.use_ep or tp_code == 1:
             print('hehehehehehehheheheh')
             return self._forward_single_gpu(x)
+
+        # Early return for shared-only layers
+        if self.shared_only:
+            return self._forward_shared_only(x)
+        
+        
         
         B, T, C = x.shape
         device = x.device
