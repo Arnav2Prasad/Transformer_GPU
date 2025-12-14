@@ -54,8 +54,8 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
 
-from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, DataLoader, get_lr, estimate_loss, Trainconfig
-from llm_code import LLM
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, DataLoader, get_lr, estimate_loss, Trainconfig, LLM ,
+# from llm_code import LLM
 
 
 

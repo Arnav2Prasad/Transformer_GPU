@@ -56,7 +56,7 @@ import wandb
 from datetime import datetime
 import glob  # <-- MISSING
 import gc    # <-- MISSING
-from llm_code import LLM
+from config_code import LLM
 
 
 class ColumnParallelLinear(nn.Module):
