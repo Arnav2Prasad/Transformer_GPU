@@ -1023,6 +1023,11 @@ class LLM(nn.Module):
         self.train()
         return idx
 
+
+
+
+
+
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig , tp_group=None , enable_tp = True):
@@ -1035,20 +1040,7 @@ class MLP(nn.Module):
                 enable_tp and (tp_group is not None) and (self.tp_size > 1) and dist.is_initialized()
             )
         
-        # if self.non_linearity == 'swiglu':
-        #     # One projection, then split into two halves
-        #     self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)
-        #     self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
-        # else:
-        #     non_linearity_map = {
-        #         'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
-        #         'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-        #         'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
-        #         'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()
-        #     }
-        #     self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
-        #     self.non_linearity_func = non_linearity_map.get(self.non_linearity, nn.GELU())
-        #     self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+
 
         if tp_code==1:
             # TP path: ColumnParallel (gather_output=False) then RowParallel (input_is_parallel=True)
@@ -1747,6 +1739,7 @@ class MoE(nn.Module):
 
     def forward_single_gpu(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
+        print('inside forward_single_gpu()')
         
 
         B, T, C = x.shape
