@@ -1591,6 +1591,7 @@ class MoE(nn.Module):
         
         # combine to output
         y = (shared_output + routed_output).view(B, T, C)
+        print('return from tp_forward()')
         return y, aux_loss
 
 
