@@ -49,6 +49,9 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
 
+from my_code import LLMconfig
+
+
 class ColumnParallelLinear(nn.Module):
     """Shard the weight matrix along output dimension (column-wise)"""
 

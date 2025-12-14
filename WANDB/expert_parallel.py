@@ -49,6 +49,9 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
 
+from my_code import LLMconfig
+
+
 
 class EPLayout:
     """Manages expert distribution across EP ranks"""
