@@ -49,7 +49,7 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
 
-from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, DataLoader
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, DataLoader, _get_group_and_ranks
 
 from datetime import datetime
 import wandb
@@ -134,16 +134,7 @@ class RowParallelLinear(nn.Module):
 
 
 
-# we added the below code
-def _get_group_and_ranks(tp_group = None):
-    """Get TP group, world size, and rank - safer version""" 
-    if not dist.is_initialized():
-        print('inside if not dist.is_initialized() ')
-        return None ,1, 0
-    
-    tp_group = tp_group or dist.group.WORLD
 
-    return tp_group , dist.get_world_size(tp_group) , dist.get_rank(tp_group)
 
 
 def init_distributed():

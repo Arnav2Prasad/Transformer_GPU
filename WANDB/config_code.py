@@ -99,6 +99,21 @@ print('2 for No CP')
 
 
 
+
+# we added the below code
+def _get_group_and_ranks(tp_group = None):
+    """Get TP group, world size, and rank - safer version""" 
+    if not dist.is_initialized():
+        print('inside if not dist.is_initialized() ')
+        return None ,1, 0
+    
+    tp_group = tp_group or dist.group.WORLD
+
+    return tp_group , dist.get_world_size(tp_group) , dist.get_rank(tp_group)
+
+
+    
+
 @dataclass
 class LLMconfig:
     # token params
