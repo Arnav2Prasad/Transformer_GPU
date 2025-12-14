@@ -312,6 +312,12 @@ elif ModelConfig.attn == 'mla':
 
 
 
+# Add this near the start of your training script
+import torch._dynamo
+torch._dynamo.config.capture_scalar_outputs = True  # Helps with .item() calls
+torch._dynamo.config.suppress_errors = False  # Keep as False for better debugging
+
+
 if cp_code == 1:
     # After dist.init_process_group()
     ModelConfig.context_parallel_size = world_size
