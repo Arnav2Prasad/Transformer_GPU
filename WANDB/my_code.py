@@ -106,7 +106,7 @@ from context_parallel import all_gather_sequence
 from expert_parallel import create_worker_model, find_latest_checkpoint, save_checkpoint, load_checkpoint, finalize_training, setup_ep_groups, main_worker
 
 
-from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, EPLayout
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, EPLayout, DataLoader
 from llm_code import MLP, Block, Attention, GQA, LLM, MoE, Expert
 
 
@@ -380,95 +380,6 @@ if tp_code==1:
 else:
     tokenize_and_save() # Using The Tiny Shakespeare dataset for demo
 
-
-class DataLoader:
-    def __init__(self, B, T, file_path, device ,context_parallel_size=1, context_parallel_rank=0):
-        self.B = B
-        self.T = T
-        self.file_path = file_path
-        self.device = device
-        # self.device_type = 'cuda'
-        # FIX: Convert device string to torch.device object
-        self.device = torch.device(device)
-        self.device_type = self.device.type  # Store device type separately if needed
-
-        if cp_code == 1:
-            self.context_parallel_size = context_parallel_size
-            self.context_parallel_rank = context_parallel_rank
-            
-            # Calculate local sequence length
-            self.local_T = T // context_parallel_size
-            assert T % context_parallel_size == 0, "Sequence length must be divisible by context parallel size"
-
-        # Keep the memory-mapped file open persistently
-        self.tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
-        self.N = len(self.tokens)
-        if self.B * self.T + 1 > self.N:
-            raise ValueError(f"Batch size {B} and block size {T} are too large for dataset of length {self.N}")
-
-    def next_batch(self):
-        """
-        Returns (x, y) where:
-        - x is (B, T) input tokens
-        - y is (B, T) target tokens (shifted by one)
-        """
-        B, T = self.B, self.T
-
-        if cp_code == 1:
-            local_T = self.local_T 
-
-        # Sample B random starting positions independently
-        start_indices = torch.randint(0, self.N - T - 1, (B,))
-
-        # Gather sequences
-        x_list = []
-        y_list = []
-        for start in start_indices:
-            if cp_code == 1:
-                full_seq = self.tokens[start : start + self.T + 1].astype(np.int64)
-            
-                # Extract local chunk for this context parallel rank
-                local_start = self.context_parallel_rank * local_T
-                local_end = local_start + local_T
-                x_local = full_seq[local_start:local_end]
-                y_local = full_seq[local_start + 1:local_end + 1]
-                
-                x_list.append(x_local)
-                y_list.append(y_local)
-
-            else:
-                seq = self.tokens[start : start + T + 1].astype(np.int64)
-                x_list.append(seq[:-1])
-                y_list.append(seq[1:])
-
-        # Stack into tensors
-        x = torch.from_numpy(np.stack(x_list)).long()
-        y = torch.from_numpy(np.stack(y_list)).long()
-
-        if cp_code == 1:
-            # Verify local sequence length
-            assert x.shape[1] == self.local_T, f"Expected local_T={self.local_T}, got {x.shape[1]}"
-
-        # Move to device (with pinned memory if CUDA)
-        if self.device_type == 'cuda':
-            x = x.pin_memory().to(self.device, non_blocking=True)
-            y = y.pin_memory().to(self.device, non_blocking=True)
-        else:
-            x = x.to(self.device)
-            y = y.to(self.device)
-        return x, y
-
-    def close(self):
-        """Close memory-mapped file to release resources"""
-        try:
-            # Access the underlying mmap object and close it
-            if hasattr(self.tokens, '_mmap'):
-                self.tokens._mmap.close()
-            # Also try to delete the reference
-            del self.tokens
-        except Exception as e:
-            # Silently fail if closing doesn't work
-            pass
 
 
 

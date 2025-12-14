@@ -49,7 +49,7 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
 
-from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, DataLoader
 
 from datetime import datetime
 import wandb
