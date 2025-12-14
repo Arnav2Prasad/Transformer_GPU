@@ -1517,6 +1517,203 @@ class MoE(nn.Module):
             self._capacity = new_capacity
             self._buffers_allocated = True
 
+    def tp_forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        print('here...!!!!!!')
+        B, T, C = x.shape
+        device = x.device
+        dtype = x.dtype
+        
+        # 1) Rank 0 computes routing and shared experts
+        if self.rank == 0:
+            x_flat = x.view(-1, C)  # (B*T, C)
+            n_tokens = x_flat.shape[0]
+            
+            # Shared experts
+            shared_out = torch.zeros_like(x_flat)
+            if self.n_shared > 0:
+                for expert in self.shared_experts:
+                    shared_out += expert(x_flat)
+            
+            # Routing logic with fp32 for numerical stability
+            router_logits = self.gate(x_flat).float()  # Compute in fp32
+            
+            if self.config.aux_free:
+                biased_logits = router_logits + self.expert_bias
+                topk_logits, topk_indices = torch.topk(biased_logits, self.n_act_routed, dim=1)
+                topk_original = torch.gather(router_logits, 1, topk_indices)
+                topk_gates = F.softmax(topk_original, dim=1).to(x_flat.dtype)  # Convert back to model dtype
+                
+                # Aux loss calculation
+                with torch.no_grad():
+                    ones = torch.ones_like(topk_indices, dtype=torch.float)
+                    fi_counts = torch.zeros(self.n_routed, device=device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                    fi = fi_counts / n_tokens
+                
+                if self.training:
+                    with torch.no_grad():
+                        ideal_load = 1.0 / self.n_routed
+                        delta = ideal_load - fi
+                        # Clamp bias updates to prevent drift
+                        self.expert_bias.add_(self.config.gamma * delta).clamp_(-5.0, 5.0)
+                
+                router_probs = F.softmax(router_logits, dim=1)
+                pi = router_probs.mean(dim=0)
+                aux_loss = self.config.alpha * self.n_routed * torch.sum(pi * fi)
+            else:
+                router_probs = F.softmax(router_logits, dim=1)
+                topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
+                topk_gates = F.softmax(topk_logits, dim=1).to(x_flat.dtype)  # Convert back to model dtype
+                
+                with torch.no_grad():
+                    ones = torch.ones_like(topk_indices, dtype=torch.float)
+                    fi_counts = torch.zeros(self.n_routed, device=device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                    fi = fi_counts / n_tokens
+                
+                pi = router_probs.mean(dim=0)
+                aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
+            
+            # For top-1 routing (simplified - extend to top-k as needed)
+            expert_choices = topk_indices[:, 0]  # (n_tokens,)
+            gate_values = topk_gates[:, 0]       # (n_tokens,)
+            
+            # CORRECTED: Vectorized destination and local index computation
+            n_local = self.layout.n_local
+            dest_ranks = torch.div(expert_choices, n_local, rounding_mode='floor').clamp_max(self.world_size - 1)
+            
+            # Sort by destination for efficient all-to-all
+            dest_sorted, perm = torch.sort(dest_ranks)
+            xs_sorted = x_flat[perm]
+            gs_sorted = gate_values[perm]
+            es_sorted = expert_choices[perm]
+            restore_idx = torch.argsort(perm)
+            
+            # CORRECTED: Local indices relative to owner
+            local_indices = es_sorted - dest_sorted * n_local
+            
+            # Calculate split sizes with guard for empty batches
+            if n_tokens > 0:
+                counts = torch.bincount(dest_sorted, minlength=self.world_size)
+            else:
+                counts = torch.zeros(self.world_size, device=device, dtype=torch.long)
+        else:
+            xs_sorted = torch.empty(0, C, device=device, dtype=dtype)
+            gs_sorted = torch.empty(0, device=device, dtype=dtype)
+            es_sorted = torch.empty(0, device=device, dtype=torch.long)
+            local_indices = torch.empty(0, device=device, dtype=torch.long)
+            restore_idx = torch.empty(0, device=device, dtype=torch.long)
+            counts = torch.zeros(self.world_size, device=device, dtype=torch.long)
+            shared_out = torch.zeros(0, C, device=device, dtype=dtype)  # Empty tensor
+            aux_loss = torch.tensor(0.0, device=device)
+
+        # 2) CORRECTED: Build send-counts matrix S (sender x dest)
+        S = torch.zeros(self.world_size, self.world_size, device=device, dtype=torch.long)
+        if self.rank == 0:
+            S[0] = counts  # row 0: rank 0 sends to all dests
+        
+        dist.broadcast(S, src=0, group=self.ep_group)
+
+        # Safe assertion with distributed abort
+        if self.rank == 0:
+            self._assert(int(S.sum().item()) == B * T, 
+                        f"Sum of send counts {int(S.sum().item())} must equal number of tokens {B * T}")
+
+        # CORRECTED: Split sizes for dispatch (avoid device→host sync in loops)
+        in_splits = S[self.rank].cpu().tolist()       # what I send
+        out_splits = S[:, self.rank].cpu().tolist()   # what I receive
+
+        # CRITICAL FIX: Allocate buffers based on actual received sizes, not B*T
+        needed_tokens = sum(out_splits)
+        self._allocate_buffers(needed_tokens, C, device, dtype)
+
+        # 3) All-to-all: dispatch tokens to expert owners
+        # Use pre-allocated buffers
+        recv_tokens = self._recv_tokens[:needed_tokens]
+        recv_gates = self._recv_gates[:needed_tokens]
+        recv_local_indices = self._recv_local_indices[:needed_tokens]
+        
+        # Sanity check sizes on every rank (avoid device→host sync in loops)
+        self._assert(int(S[:, self.rank].sum().item()) == recv_tokens.size(0), 
+                    f"Split size mismatch: {int(S[:, self.rank].sum().item())} != {recv_tokens.size(0)}")
+        
+        # CRITICAL FIX: Never skip collectives - always call them even with zero sizes
+        # Dispatch phase
+        dist.all_to_all_single(
+            recv_tokens, xs_sorted, 
+            output_split_sizes=out_splits,
+            input_split_sizes=in_splits, 
+            group=self.ep_group
+        )
+        dist.all_to_all_single(
+            recv_gates, gs_sorted,
+            output_split_sizes=out_splits,
+            input_split_sizes=in_splits, 
+            group=self.ep_group
+        )
+        dist.all_to_all_single(
+            recv_local_indices, local_indices,
+            output_split_sizes=out_splits,
+            input_split_sizes=in_splits, 
+            group=self.ep_group
+        )
+
+        # 4) Process local experts with safety check and optimized bucketing
+        y_local = torch.zeros_like(recv_tokens)
+        if recv_tokens.size(0) > 0:
+            # Safety check for local indices
+            self._assert((recv_local_indices < len(self.local_routed_experts)).all(),
+                        f"Local index out of bounds: {recv_local_indices.max()} >= {len(self.local_routed_experts)}")
+            
+            # OPTIMIZED: Bucket by local expert using sorting for better cache locality
+            sorted_indices = torch.argsort(recv_local_indices)
+            recv_lidx_sorted = recv_local_indices[sorted_indices]
+            recv_tokens_sorted = recv_tokens[sorted_indices]
+            recv_gates_sorted = recv_gates[sorted_indices]
+            
+            # Process contiguous ranges
+            unique_experts, uc_counts = torch.unique_consecutive(recv_lidx_sorted, return_counts=True)
+            start_idx = 0
+            for expert_id, count in zip(unique_experts, uc_counts):
+                end_idx = start_idx + count
+                expert_tokens = recv_tokens_sorted[start_idx:end_idx]
+                expert_gates = recv_gates_sorted[start_idx:end_idx]
+                expert_output = self.local_routed_experts[expert_id](expert_tokens)
+                y_local[sorted_indices[start_idx:end_idx]] = expert_output * expert_gates.unsqueeze(1)
+                start_idx = end_idx
+
+        # 5) CORRECTED: Return trip with proper split matrix
+        # Return matrix R = S.T (owners send back to sources)
+        R = S.t().contiguous()
+        in_splits_back = R[self.rank].cpu().tolist()       # what I send back
+        out_splits_back = R[:, self.rank].cpu().tolist()   # what I receive back
+
+        # CRITICAL FIX: Allocate return buffers based on actual sizes
+        needed_back = sum(out_splits_back)
+        if needed_back > self._capacity:
+            self._allocate_buffers(max(needed_tokens, needed_back), C, device, dtype)
+
+        # CORRECTED: Allocate on ALL ranks with proper sizes using pre-allocated buffer
+        send_back = y_local
+        got_back = self._got_back[:needed_back]
+        
+        # CRITICAL FIX: Never skip collectives - always call them even with zero sizes
+        dist.all_to_all_single(
+            got_back, send_back,
+            output_split_sizes=out_splits_back,
+            input_split_sizes=in_splits_back, 
+            group=self.ep_group
+        )
+
+        # 6) Rank 0 combines outputs and returns final result
+        if self.rank == 0:
+            # Restore original order
+            y_routed = got_back[restore_idx]
+            # Combine with shared output
+            y_combined = (shared_out + y_routed).view(B, T, C)
+            return y_combined, aux_loss
+        else:
+            # Other ranks return zeros (they don't contribute to final output)
+            return torch.zeros(B, T, C, device=device, dtype=dtype), torch.tensor(0.0, device=device)
+
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -1528,7 +1725,7 @@ class MoE(nn.Module):
         # Short-circuit for single GPU
         if tp_code == 1:
             print('hehehehehehehheheheh')
-            return self._forward_single_gpu(x)
+            return self.tp_forward(self,x)
 
         # Early return for shared-only layers
         if self.shared_only:
