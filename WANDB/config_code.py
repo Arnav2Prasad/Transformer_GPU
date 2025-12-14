@@ -73,7 +73,7 @@ print('merging_code : ',merging_code)
     
 # 1 for DP
 # 2 for FSDP
-ddp_flag = 1
+ddp_flag = 2
 print('1 for DP')
 print('2 for FSDP')
 print('------')
@@ -1814,9 +1814,10 @@ class MoE(nn.Module):
         routed_output = torch.zeros_like(x_flat)
 
         print('before for loop')
+        print('n_routed : ',self.n_routed)
 
         for i in range(self.n_routed):
-            print('n_routed : ',self.n_routed)
+            
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
             if token_indices.numel() > 0:
                 print('inside if token_indices.numel() > 0:')
