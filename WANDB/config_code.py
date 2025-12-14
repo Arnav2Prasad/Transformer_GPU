@@ -1526,7 +1526,7 @@ class MoE(nn.Module):
             return self.forward_single_gpu(x)
 
         # Short-circuit for single GPU
-        if not self.use_ep or tp_code == 1:
+        if tp_code == 1:
             print('hehehehehehehheheheh')
             return self._forward_single_gpu(x)
 
