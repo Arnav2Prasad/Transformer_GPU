@@ -33,7 +33,7 @@ import gc    # <-- MISSING
 # 1 for plain DP
 # 2 for zero1
 # 3 for zero2
-merging_code = 1
+merging_code = 3
 print('1 for plain DP')
 print('2 for zero1')
 print('3 for zero2')
