@@ -477,8 +477,8 @@ class LLM(nn.Module):
             print("Using plain DP or tp_code = 1 ; this is an OR condition")
 
         elif merging_code == 2:
-            if not ZERO_OPTIMIZER_AVAILABLE:
-                raise ImportError("ZeroRedundancyOptimizer not available. Upgrade PyTorch or use merging_code=1")
+            # if not ZERO_OPTIMIZER_AVAILABLE:
+            #     raise ImportError("ZeroRedundancyOptimizer not available. Upgrade PyTorch or use merging_code=1")
             optimizer = ZeroRedundancyOptimizer(
                 optim_groups,
                 optimizer_class=torch.optim.AdamW,
@@ -490,9 +490,7 @@ class LLM(nn.Module):
         elif merging_code == 3:
             # ZeRO-2: Both optimizer state AND gradient sharding
 
-            # ZeRO-2: Both optimizer state AND gradient sharding
-            if not ZERO_OPTIMIZER_AVAILABLE:
-                raise ImportError("ZeroRedundancyOptimizer not available. Upgrade PyTorch or use merging_code=1")
+            
             
             optimizer = ZeroRedundancyOptimizer(
                 optim_groups,
