@@ -682,7 +682,7 @@ def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
 
 
 
-def main():
+def main(TrainingConfig, ModelConfig):
     """Main function for torchrun launch method"""
     import os
     try:

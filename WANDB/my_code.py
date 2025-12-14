@@ -2086,7 +2086,7 @@ print_all_gpu_memory("Initial")
 
 if ep_code == 1:
     if __name__ == "__main__":
-        main()
+        main(TrainingConfig=TrainingConfig, ModelConfig)
 
 else:
     if tp_code == 1:
