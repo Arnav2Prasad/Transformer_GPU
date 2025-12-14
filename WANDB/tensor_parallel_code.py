@@ -49,7 +49,7 @@ from torch.distributed.fsdp.wrap import ModuleWrapPolicy
 from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
 
 
-from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, DataLoader, _get_group_and_ranks
+from config_code import LLMconfig, merging_code, ddp_flag , tp_code, ep_code, cp_code, DataLoader, _get_group_and_ranks, RowParallelLinear, ColumnParallelLinear
 
 from datetime import datetime
 import wandb
@@ -57,80 +57,6 @@ from datetime import datetime
 import glob  # <-- MISSING
 import gc    # <-- MISSING
 from config_code import LLM
-
-
-class ColumnParallelLinear(nn.Module):
-    """Shard the weight matrix along output dimension (column-wise)"""
-
-    def __init__(self , in_features , out_features , bias = True , gather_output=True , group = None):
-        super().__init__()
-
-        self.group  , self.world_size , self.rank  = _get_group_and_ranks(group)
-
-        assert out_features % self.world_size == 0, \
-            f"out_features={out_features} not divisible by TP world_size={self.world_size}"
-
-        self.local_out_features = out_features // self.world_size
-
-        self.linear = nn.Linear(in_features, self.local_out_features, bias=bias)
-        self.gather_output = gather_output
-
-
-        # TP-aware initialization for better training parity
-        self._apply_tp_aware_init()
-
-
-    def _apply_tp_aware_init(self):
-        """Scale initialization for TP parity"""
-
-        with torch.no_grad():
-            # Scale weights by 1/sqrt(tp_size) for variance preservation
-            if self.world_size > 1:
-
-                self.linear.weight.data.div_(self.world_size ** 0.5)
-
-                if self.linear.bias is not None:
-                    self.linear.bias.data.div_(self.world_size ** 0.5)
-
-    def forward(self , x):
-        local_output = self.linear(x)
-
-        if self.world_size > 1 and self.gather_output:
-            # Faster all-gather with pre-allocated tensor
-            full_output = torch.empty(
-                *local_output.shape[:-1],
-                local_output.shape[-1] * self.world_size,
-                dtype=local_output.dtype,
-                device=local_output.device
-            )
-            dist.all_gather_into_tensor(full_output, local_output, group=self.group)
-            return full_output
-        return local_output
-
-class RowParallelLinear(nn.Module):
-    """Shard the weight matrix along input dimension (row-wise)"""
-    def __init__(self, in_features, out_features, bias=True, input_is_parallel=False, group=None):
-        super().__init__()
-        self.group, self.world_size, self.rank = _get_group_and_ranks(group)
-        
-        assert in_features % self.world_size == 0, \
-            f"in_features={in_features} not divisible by TP world_size={self.world_size}"
-        
-        self.local_in_features = in_features // self.world_size
-        self.linear = nn.Linear(self.local_in_features, out_features, bias=bias)
-        self.input_is_parallel = input_is_parallel
-        
-    def forward(self, x):
-        if not self.input_is_parallel and self.world_size > 1:
-            # Split input along feature dimension
-            x = x.chunk(self.world_size, dim=-1)[self.rank]
-        
-        local_output = self.linear(x)
-        
-        if self.world_size > 1:
-            dist.all_reduce(local_output, op=dist.ReduceOp.SUM, group=self.group)
-            
-        return local_output
 
 
 
