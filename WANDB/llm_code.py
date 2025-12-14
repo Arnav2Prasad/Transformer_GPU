@@ -328,3 +328,123 @@ class LLM(nn.Module):
         self.train()
         return idx
 
+
+
+
+
+
+
+class MLP(nn.Module):
+    """ A simple feed-forward network block. """
+    def __init__(self, config: LLMconfig , tp_group=None , enable_tp = True):
+        super().__init__()
+        self.non_linearity = config.non_linearity.lower()
+
+        if tp_code == 1:
+            self.tp_group, self.tp_size, self.tp_rank = _get_group_and_ranks(tp_group)
+            self.enable_tp = (
+                enable_tp and (tp_group is not None) and (self.tp_size > 1) and dist.is_initialized()
+            )
+        
+        # if self.non_linearity == 'swiglu':
+        #     # One projection, then split into two halves
+        #     self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)
+        #     self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+        # else:
+        #     non_linearity_map = {
+        #         'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+        #         'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+        #         'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
+        #         'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()
+        #     }
+        #     self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
+        #     self.non_linearity_func = non_linearity_map.get(self.non_linearity, nn.GELU())
+        #     self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+
+        if tp_code==1:
+            # TP path: ColumnParallel (gather_output=False) then RowParallel (input_is_parallel=True)
+            if self.non_linearity == 'swiglu':
+                self.c_fc = ColumnParallelLinear(
+                    config.n_embd, 2 * config.up_dim, bias=False,  # ✅ 2*up_dim for SwiGLU
+                    gather_output=False, group=self.tp_group
+                )
+                self.c_proj = RowParallelLinear(
+                    config.up_dim, config.n_embd, bias=False,
+                    input_is_parallel=True, group=self.tp_group
+                )
+            else:
+                self.c_fc = ColumnParallelLinear(
+                    config.n_embd, config.up_dim, bias=False,
+                    gather_output=False, group=self.tp_group
+                )
+                self.c_proj = RowParallelLinear(
+                    config.up_dim, config.n_embd, bias=False,
+                    input_is_parallel=True, group=self.tp_group
+                )
+        else:
+            # Replicated fallback (no TP)
+            if self.non_linearity == 'swiglu':
+                self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)  # ✅ 2*up_dim
+                self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+            else:
+                self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
+                self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        if self.non_linearity == 'swiglu':
+            x1, x2 = self.c_fc(x).chunk(2, dim=-1)
+            x = F.silu(x1) * x2
+        else:
+            x = self.c_fc(x)
+            x = self.non_linearity_func(x)
+        
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+
+class Block(nn.Module):
+    """ A single Transformer block combining attention and MLP. """
+    def __init__(self, config:LLMconfig , tp_group = None):
+        super().__init__()
+        self.is_moe = config.moe
+        self.act_recomp = config.act_recomp
+        self.attn = Attention(config , tp_group=tp_group)
+        self.ln1  = nn.LayerNorm(config.n_embd)
+        self.ln2  = nn.LayerNorm(config.n_embd)
+
+        if ep_code == 1:
+            # Initialize EP attributes if they don't exist
+            if not hasattr(config, 'ep_rank'):
+                config.ep_rank = 0
+            if not hasattr(config, 'ep_size'):
+                config.ep_size = 1
+            if not hasattr(config, 'ep_group'):
+                config.ep_group = None
+
+
+        if config.moe:
+            self.moe = MoE(config)
+        else:
+            # self.mlp = MLP(config)
+            # ✅ MLP gets TP support
+            self.mlp = MLP(config, tp_group=tp_group, enable_tp=True)
+
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
+        if self.act_recomp:
+            attn_output, updated_kv_cache = checkpoint(self.attn, self.ln1(x), freqs_cis, kv_cache, VAL_RUN, use_reentrant=False)
+        else:
+            attn_output, updated_kv_cache = self.attn(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
+        
+        x = x + attn_output
+
+        # NO checkpointing the MoE/MLP part -> memory grows O(T^2) for attn, O(T) for MoE, +scary looking error when we add MoE in checkpoint  
+        if self.is_moe: 
+            moe_output, aux_loss = self.moe(self.ln2(x))
+            x = x + moe_output
+        else:
+            aux_loss = 0.0
+            x = x + self.mlp(self.ln2(x))
+
+        return x, updated_kv_cache, aux_loss
