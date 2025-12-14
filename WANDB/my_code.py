@@ -1323,6 +1323,7 @@ class Trainconfig:
     file_name : str
     act_recomp : bool
     wandb_run_name : str | None = None
+    wandb_project : str | None = None
 
 TrainingConfig = Trainconfig(
     dataset='shakespeare',
