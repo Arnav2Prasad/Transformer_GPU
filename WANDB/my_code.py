@@ -645,7 +645,7 @@ class MoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
-        if self.use_cp:
+        if self.use_cp or ddp_flag == 2:
             return self.forward_single_gpu(x)
 
         # Early return for shared-only layers
