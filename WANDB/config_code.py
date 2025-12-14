@@ -1520,7 +1520,7 @@ class MoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
-        if self.use_cp or ddp_flag == 2 or tp_code == 1:
+        if self.use_cp:
             print('Class MoE - forward() - inside if self.use_cp or ddp_flag == 2 or tp_code == 1')
             print('now calling : self.forward_single_gpu(x)')
             return self.forward_single_gpu(x)
@@ -1530,7 +1530,7 @@ class MoE(nn.Module):
             return self._forward_shared_only(x)
         
         # Short-circuit for single GPU
-        if not self.use_ep:
+        if not self.use_ep or tp_code == 1:
             return self._forward_single_gpu(x)
         
         B, T, C = x.shape
