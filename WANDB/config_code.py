@@ -1412,25 +1412,7 @@ class MoE(nn.Module):
         super().__init__()
         self.config = config
 
-        # TP setup
-        self.use_tp = (tp_code == 1)
-        if self.use_tp:
-            self.tp_rank = config.tp_rank
-            self.tp_size = config.tp_size
-            self.tp_group = config.tp_group
-            
-            # Split experts across TP ranks
-            total_experts = config.n_exp
-            experts_per_rank = total_experts // self.tp_size
-            start_idx = self.tp_rank * experts_per_rank
-            end_idx = start_idx + experts_per_rank
-            
-            self.local_experts = nn.ModuleList([
-                Expert(config) for _ in range(experts_per_rank)
-            ])
-            
-            # Gate is duplicated on all TP ranks
-            self.gate = nn.Linear(config.n_embd, config.n_routed, bias=False)
+    
 
         if ep_code == 1:
             if not hasattr(config, 'ep_rank'):
@@ -1444,16 +1426,16 @@ class MoE(nn.Module):
             self.world_size = config.ep_size
             self.ep_group = config.ep_group
         
-        if not self.use_tp:
-            # first `n_shared` are shared, the rest are routed
-            self.n_shared = config.n_shared
-            self.n_routed = config.n_exp - config.n_shared
+        
+        # first `n_shared` are shared, the rest are routed
+        self.n_shared = config.n_shared
+        self.n_routed = config.n_exp - config.n_shared
 
-            # Store whether we're using CP
-            self.use_cp = (cp_code == 1)
-            
-            # Number of experts to activate from the ROUTED pool
-            self.n_act_routed = config.n_act - config.n_shared
+        # Store whether we're using CP
+        self.use_cp = (cp_code == 1)
+        
+        # Number of experts to activate from the ROUTED pool
+        self.n_act_routed = config.n_act - config.n_shared
 
 
 
@@ -1470,8 +1452,7 @@ class MoE(nn.Module):
                 self.shared_only = False
 
 
-        if not self.use_tp:
-            assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
+        assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
 
 
         if ep_code == 1:
@@ -1507,12 +1488,12 @@ class MoE(nn.Module):
             self._got_back = None
 
         else:
-            if not self.use_tp:
-                self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
-                self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
-                
-                if config.aux_free:
-                    self.register_buffer('expert_bias', torch.zeros(self.n_routed))
+            
+            self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
+            self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
+            
+            if config.aux_free:
+                self.register_buffer('expert_bias', torch.zeros(self.n_routed))
 
 
 
@@ -1774,6 +1755,7 @@ class MoE(nn.Module):
         n_tokens = x_flat.shape[0]
 
         # ___________ SHARED EXPERT PATH ___________
+        print('in Line 1758 : SHARED EXPERT PATH ')
 
         shared_output = torch.zeros_like(x_flat)
         if self.n_shared > 0:
@@ -1781,10 +1763,12 @@ class MoE(nn.Module):
                 shared_output += self.experts[i](x_flat) # bypass the router
 
         #  ___________ ROUTED EXPERT PATH ___________
+        print('in line 1766 : in ROUTED EXPERT PATH')
 
         router_logits = self.gate(x_flat)
 
-        if self.config.aux_free:        
+        if self.config.aux_free:       
+            print('inside if condition : if self.config.aux_free:  ') 
             # Add Bias and then select topk
             biased_router_logits = router_logits + self.expert_bias
             topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
@@ -1794,10 +1778,13 @@ class MoE(nn.Module):
             topk_gates = F.softmax(topk_original_logits, dim=1)
 
             # Calculate expert load and update bias during training only
+            print('before with L with torch.no_grad():')
             with torch.no_grad():
                 ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
                 fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
                 fi = fi_counts / n_tokens
+
+            print('before if self.training:')
 
             if self.training:
                 with torch.no_grad():
@@ -1810,6 +1797,7 @@ class MoE(nn.Module):
             aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
 
         else:
+            print('inside else condition')
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
             
@@ -1825,9 +1813,12 @@ class MoE(nn.Module):
         # Dispatch
         routed_output = torch.zeros_like(x_flat)
 
+        print('before for loop')
+
         for i in range(self.n_routed):
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
             if token_indices.numel() > 0:
+                print('inside if token_indices.numel() > 0:')
                 tokens_for_expert = x_flat[token_indices]
                 gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
 
