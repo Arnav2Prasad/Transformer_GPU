@@ -340,6 +340,37 @@ class Trainconfig:
 
 
 
+def all_gather_sequence(tensor: torch.Tensor, dim: int, group=None) -> torch.Tensor:
+    """Efficient all-gather along specified dimension using all_gather_into_tensor"""
+    if not torch.distributed.is_initialized():
+        return tensor
+        
+    world_size = torch.distributed.get_world_size(group=group)
+    if world_size == 1:
+        return tensor
+
+    # Move target dimension to front for all_gather_into_tensor
+    perm = list(range(tensor.ndim))
+    perm[0], perm[dim] = perm[dim], perm[0]
+    t_perm = tensor.permute(perm).contiguous()
+
+    T_local = t_perm.size(0)
+    out_perm = torch.empty(
+        (T_local * world_size, *t_perm.shape[1:]),
+        dtype=t_perm.dtype, 
+        device=t_perm.device
+    )
+
+    torch.distributed.all_gather_into_tensor(out_perm, t_perm, group=group)
+
+    inv_perm = list(range(tensor.ndim))
+    inv_perm[0], inv_perm[dim] = inv_perm[dim], inv_perm[0]
+    out = out_perm.permute(inv_perm).contiguous()
+    
+    return out
+
+    
+
 
 
 class ZeRO2GradientHandler:
