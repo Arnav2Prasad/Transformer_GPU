@@ -1412,6 +1412,26 @@ class MoE(nn.Module):
         super().__init__()
         self.config = config
 
+        # TP setup
+        self.use_tp = (tp_code == 1)
+        if self.use_tp:
+            self.tp_rank = config.tp_rank
+            self.tp_size = config.tp_size
+            self.tp_group = config.tp_group
+            
+            # Split experts across TP ranks
+            total_experts = config.n_exp
+            experts_per_rank = total_experts // self.tp_size
+            start_idx = self.tp_rank * experts_per_rank
+            end_idx = start_idx + experts_per_rank
+            
+            self.local_experts = nn.ModuleList([
+                Expert(config) for _ in range(experts_per_rank)
+            ])
+            
+            # Gate is duplicated on all TP ranks
+            self.gate = nn.Linear(config.n_embd, config.n_routed, bias=False)
+
         if ep_code == 1:
             if not hasattr(config, 'ep_rank'):
                 config.ep_rank = 0
@@ -1424,15 +1444,18 @@ class MoE(nn.Module):
             self.world_size = config.ep_size
             self.ep_group = config.ep_group
         
-        # first `n_shared` are shared, the rest are routed
-        self.n_shared = config.n_shared
-        self.n_routed = config.n_exp - config.n_shared
+        if not self.use_tp:
+            # first `n_shared` are shared, the rest are routed
+            self.n_shared = config.n_shared
+            self.n_routed = config.n_exp - config.n_shared
 
-        # Store whether we're using CP
-        self.use_cp = (cp_code == 1)
-        
-        # Number of experts to activate from the ROUTED pool
-        self.n_act_routed = config.n_act - config.n_shared
+            # Store whether we're using CP
+            self.use_cp = (cp_code == 1)
+            
+            # Number of experts to activate from the ROUTED pool
+            self.n_act_routed = config.n_act - config.n_shared
+
+
 
         if ep_code == 1:
             # Early return for shared-only layers
@@ -1447,8 +1470,8 @@ class MoE(nn.Module):
                 self.shared_only = False
 
 
-
-        assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
+        if not self.use_tp:
+            assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
 
 
         if ep_code == 1:
@@ -1484,11 +1507,15 @@ class MoE(nn.Module):
             self._got_back = None
 
         else:
-            self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
-            self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
-            
-            if config.aux_free:
-                self.register_buffer('expert_bias', torch.zeros(self.n_routed))
+            if not self.use_tp:
+                self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
+                self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
+                
+                if config.aux_free:
+                    self.register_buffer('expert_bias', torch.zeros(self.n_routed))
+
+
+
 
     def _assert(self, condition: bool, message: str):
         """Safe assertion that aborts distributed process group immediately on failure"""
@@ -1741,7 +1768,7 @@ class MoE(nn.Module):
         """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
         print('inside forward_single_gpu()')
         
-        '''
+        
         B, T, C = x.shape
         x_flat = x.view(-1, C)  # Shape: (B*T, C)
         n_tokens = x_flat.shape[0]
@@ -1814,81 +1841,7 @@ class MoE(nn.Module):
         y = (shared_output + routed_output).view(B, T, C)
         print(' the function forward_single_gpu has returned')
         return y, aux_loss
-        '''
-
-        """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
-        B, T, C = x.shape
-        x_flat = x.view(-1, C)  # Shape: (B*T, C)
-        n_tokens = x_flat.shape[0]
-
-        # ___________ SHARED EXPERT PATH ___________
-
-        shared_output = torch.zeros_like(x_flat)
-        if self.n_shared > 0:
-            for i in range(self.n_shared):
-                shared_output += self.experts[i](x_flat) # bypass the router
-
-        #  ___________ ROUTED EXPERT PATH ___________
-
-        router_logits = self.gate(x_flat)
-
-        if self.config.aux_free:        
-            # Add Bias and then select topk
-            biased_router_logits = router_logits + self.expert_bias
-            topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
-
-            # Gating weights are based on un-biased logits
-            topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
-            topk_gates = F.softmax(topk_original_logits, dim=1)
-
-            # Calculate expert load and update bias during training only
-            with torch.no_grad():
-                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
-                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-                fi = fi_counts / n_tokens
-
-            if self.training:
-                with torch.no_grad():
-                    ideal_load = 1.0 / self.n_routed
-                    delta = ideal_load - fi 
-                    self.expert_bias += (self.config.gamma*delta)
-
-            router_probs = F.softmax(router_logits, dim=1)
-            pi = router_probs.mean(dim=0)
-            aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
-
-        else:
-            router_probs = F.softmax(router_logits, dim=1)
-            pi = router_probs.mean(dim=0)
-            
-            topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
-            ones = torch.ones_like(topk_indices, dtype=torch.float)
-            fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-            fi = fi_counts / n_tokens
-
-            aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
-
-            topk_gates = F.softmax(topk_logits, dim=1)  
-
-        # Dispatch
-        routed_output = torch.zeros_like(x_flat)
-
-        for i in range(self.n_routed):
-            token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
-            if token_indices.numel() > 0:
-                tokens_for_expert = x_flat[token_indices]
-                gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
-
-                # access the expert using an offset of `n_shared`
-                expert_output = self.experts[i + self.n_shared](tokens_for_expert)
-                
-                weighted_output = expert_output * gates_for_expert
-                routed_output.index_add_(0, token_indices, weighted_output)
         
-        # combine to output
-        y = (shared_output + routed_output).view(B, T, C)
-        print(' the function forward_single_gpu has returned')
-        return y, aux_loss
 
 
     def state_dict(self, destination=None, prefix='', keep_vars=False):
