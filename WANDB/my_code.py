@@ -461,39 +461,39 @@ elif tp_code == 1:
 
 
     model = LLM(ModelConfig , tp_group=tp_group).to(device)
-    # use_wandb = not args.no_wandb and master_process
-    # if use_wandb:
-    #     total, active = model.get_num_params()  # Get params first
-    #     print(f"total parameters = {total:,}, active parameters = {active:,}")
+    use_wandb = not args.no_wandb and master_process
+    if use_wandb:
+        total, active = model.get_num_params()  # Get params first
+        print(f"total parameters = {total:,}, active parameters = {active:,}")
         
-    #     if not args.wandb_run_name:
-    #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    #         args.wandb_run_name = f"{args.dataset}_{args.attn}_{timestamp}"
+        if not args.wandb_run_name:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            args.wandb_run_name = f"{args.dataset}_{args.attn}_{timestamp}"
         
-    #     wandb.init(
-    #         project=args.wandb_project,
-    #         entity=args.wandb_entity,
-    #         name=args.wandb_run_name,
-    #         notes=args.wandb_notes,
-    #         tags=args.wandb_tags,
-    #         config={
-    #             **vars(TrainingConfig),
-    #             **vars(ModelConfig),
-    #             "total_params": total,
-    #             "active_params": active,
-    #             "world_size": world_size,
-    #             "device": device,
-    #             "dtype": dtype,
-    #             "grad_accum_steps": grad_accum_steps,
-    #             "tp_code": tp_code,
-    #             "ep_code": ep_code,
-    #             "cp_code": cp_code,
-    #             "ddp_flag": ddp_flag,
-    #             "merging_code": merging_code,
-    #         }
-    #     )
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            notes=args.wandb_notes,
+            tags=args.wandb_tags,
+            config={
+                **vars(TrainingConfig),
+                **vars(ModelConfig),
+                "total_params": total,
+                "active_params": active,
+                "world_size": world_size,
+                "device": device,
+                "dtype": dtype,
+                "grad_accum_steps": grad_accum_steps,
+                "tp_code": tp_code,
+                "ep_code": ep_code,
+                "cp_code": cp_code,
+                "ddp_flag": ddp_flag,
+                "merging_code": merging_code,
+            }
+        )
         
-    #     wandb.watch(model, log="all", log_freq=100)
+        wandb.watch(model, log="all", log_freq=100)
     if master_process : 
         total, active = model.get_num_params()
         print(f"total parameters = {total:,}, acitive parameters = {active:,}")
@@ -829,19 +829,19 @@ else:
             t0 = b
         
         
-        # # Add evaluation logging
-        # if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
-        #     losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+        # Add evaluation logging
+        if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
+            losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
             
-        #     if master_process:
-        #         print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+            if master_process:
+                print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
                 
-        #         if use_wandb:
-        #             wandb.log({
-        #                 "eval/train_loss": losses['train'],
-        #                 "eval/val_loss": losses['val'],
-        #                 "eval/step": iter,
-        #             })
+                if use_wandb:
+                    wandb.log({
+                        "eval/train_loss": losses['train'],
+                        "eval/val_loss": losses['val'],
+                        "eval/step": iter,
+                    })
 
         for micro_step in range(grad_accum_steps):
 

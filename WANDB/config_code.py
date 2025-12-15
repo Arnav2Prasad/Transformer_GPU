@@ -93,7 +93,7 @@ print('1 for EP')
 print('2 for No EP')
 
 
-cp_code = 2
+cp_code = 1
 print('1 for CP')
 print('2 for No CP')
 
