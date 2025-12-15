@@ -2528,7 +2528,7 @@ elif cp_code == 1:
 
 
 
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 
     if master_process : print("Using compiled model")
