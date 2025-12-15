@@ -3263,30 +3263,45 @@ print_all_gpu_memory("Initial")
 import torch.profiler as profiler
 from torch.profiler import tensorboard_trace_handler
 
+
 def print_profiling_stats(prof):
-    """Print useful profiling statistics"""
+    """Print useful profiling statistics - robust version"""
     print("\n" + "-"*60)
     print("PROFILING STATISTICS")
     print("-"*60)
     
-    # Get key averages
-    key_avgs = prof.key_averages()
-    
-    # Print top operations
-    print("\nTop 10 operations by CPU time:")
-    for evt in sorted(key_avgs, key=lambda x: x.cpu_time_total, reverse=True)[:10]:
-        if evt.cpu_time_total > 0:
-            print(f"  {evt.key}: {evt.cpu_time_total:.2f}ms")
-    
-    print("\nTop 10 operations by CUDA time:")
-    for evt in sorted(key_avgs, key=lambda x: x.cuda_time_total, reverse=True)[:10]:
-        if evt.cuda_time_total > 0:
-            print(f"  {evt.key}: {evt.cuda_time_total:.2f}ms")
-    
-    # Memory statistics
-    print(f"\nGPU Memory - Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-    print(f"GPU Memory - Reserved: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+    try:
+        # Use the table method which handles attributes correctly
+        table_str = prof.key_averages().table(
+            sort_by="self_cuda_time_total",
+            row_limit=15,
+            header=["Name", "Self CPU %", "Self CPU", "CPU total %", "CPU total", "CPU time avg", 
+                   "Self CUDA", "Self CUDA %", "CUDA total", "CUDA time avg", "Number of Calls"]
+        )
+        print(table_str)
+        
+    except Exception as e:
+        print(f"Note: Could not print full table: {e}")
+        # Fallback to manual printing
+        key_avgs = prof.key_averages()
+        
+        # Print summary with safe attribute access
+        print(f"\nTotal events: {len(key_avgs)}")
+        
+        # Group by operator type
+        op_types = {}
+        for evt in key_avgs:
+            op_name = evt.key.split("::")[0] if "::" in evt.key else evt.key
+            cuda_time = getattr(evt, 'self_cuda_time_total', 
+                               getattr(evt, 'cuda_time_total', 
+                                      getattr(evt, 'cuda_time', 0)))
+            op_types[op_name] = op_types.get(op_name, 0) + cuda_time
+        
+        print("\nOperator time distribution:")
+        for op, time in sorted(op_types.items(), key=lambda x: x[1], reverse=True)[:10]:
+            print(f"  {op}: {time/1000:.2f}ms")
 
+            
 def get_profiling_metrics(prof):
     """Extract profiling metrics for wandb logging"""
     metrics = {}
