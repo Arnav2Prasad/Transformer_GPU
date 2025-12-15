@@ -1,31 +1,4 @@
 
-'''
-This script builds an LLM model based on the user's CLI inputs.
-Credits:
-    - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
-    - Thanks to Vizuara AI Labs for their detailed explanations of MLA : https://youtu.be/m1x8vA_Tscc
-
-Available settings to choose from : 
-1. Attention Type (with  KV caching): 
-   - Multi Head Attention (mha)
-   - Multi Query Attention (mqa)
-   - Grouped Query Attention (gqa)
-   - Multi Head Latent Attention (mla)
-   - (Work in progress) Flash Multi Head Latent Attention (fmla)
-
-2. Positional Encodings:
-   - Learnable PE
-   - Sinusoidal PE
-   - Rotary PE (RoPE)
-
-3. Feed Forward Layers:
-   - Dense Network Layer (moe=False): Fully Connected, MLP layer
-   - Sparse Network Layer (moe=True): Mixture of Exprts
-        - Load Balancing with Auxilary Loss function (aux_free = False) 
-        - Shared Expert Isolation                    (n_shared = 0) 
-        - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
-        - Aux Loss Free Load Balancing               (aux_free = True)  
-'''
 import wandb
 from datetime import datetime
 import glob  # <-- MISSING
@@ -3148,6 +3121,23 @@ def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
                     "perf/iteration_time_ms": dt,
                     "memory/allocated_gb": mem_gb,
                 })
+
+                # Add memory usage
+                if torch.cuda.is_available():
+                    log_data.update({
+                        "memory/allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
+                        "memory/reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
+                        "memory/max_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
+                    })
+                
+                # Add profiling metrics - use the fixed version
+                if ProfilingConfig['active'] and iter % 50 == 0 and iter > 10:
+                    try:
+                        prof_metrics = get_profiling_metrics_fixed(prof)
+                        log_data.update(prof_metrics)
+                    except Exception as e:
+                        print(f"Warning: Could not get profiling metrics: {e}")
+                        log_data["prof/metrics_error"] = 1
         if use_wandb:
             wandb.finish()
                 
@@ -3263,95 +3253,227 @@ print_all_gpu_memory("Initial")
 import torch.profiler as profiler
 from torch.profiler import tensorboard_trace_handler
 
-
-def print_profiling_stats(prof):
-    """Print useful profiling statistics - robust version"""
-    print("\n" + "-"*60)
-    print("PROFILING STATISTICS")
-    print("-"*60)
+def print_profiling_summary(prof):
+    """Fixed profiling summary without total_average()"""
+    print("\n" + "="*80)
+    print("PROFILING SUMMARY")
+    print("="*80)
     
     try:
-        # Use the table method which handles attributes correctly
-        table_str = prof.key_averages().table(
-            sort_by="self_cuda_time_total",
-            row_limit=15,
-            header=["Name", "Self CPU %", "Self CPU", "CPU total %", "CPU total", "CPU time avg", 
-                   "Self CUDA", "Self CUDA %", "CUDA total", "CUDA time avg", "Number of Calls"]
-        )
-        print(table_str)
+        events = prof.key_averages()
+        
+        if not events:
+            print("No profiling events found")
+            return
+        
+        # Calculate totals from events
+        total_cpu_time = 0
+        total_cuda_time = 0
+        total_events = len(events)
+        
+        for evt in events:
+            # Get CPU time
+            cpu_time = 0
+            for attr in ['self_cpu_time_total', 'cpu_time_total', 'cpu_time']:
+                if hasattr(evt, attr):
+                    val = getattr(evt, attr)
+                    if val is not None:
+                        cpu_time = val
+                        break
+            total_cpu_time += cpu_time
+            
+            # Get CUDA time
+            cuda_time = 0
+            for attr in ['self_cuda_time_total', 'cuda_time_total', 'cuda_time']:
+                if hasattr(evt, attr):
+                    val = getattr(evt, attr)
+                    if val is not None:
+                        cuda_time = val
+                        break
+            total_cuda_time += cuda_time
+        
+        # Print totals
+        print(f"\nTotal CPU time: {total_cpu_time/1000:.3f}ms")
+        print(f"Total CUDA time: {total_cuda_time/1000:.3f}ms")
+        
+        if total_cpu_time > 0:
+            print(f"GPU Utilization: {(total_cuda_time/total_cpu_time)*100:.1f}%")
+        
+        # Print memory usage from events
+        print("\nMemory usage from profiler:")
+        max_cuda_memory = 0
+        for evt in events:
+            if hasattr(evt, 'cuda_memory_usage'):
+                mem = evt.cuda_memory_usage
+                if mem > max_cuda_memory:
+                    max_cuda_memory = mem
+        
+        if max_cuda_memory > 0:
+            print(f"Peak CUDA memory: {max_cuda_memory/(1024**2):.2f} MB")
+        
+        # Print current GPU memory
+        if torch.cuda.is_available():
+            print(f"Current allocated: {torch.cuda.memory_allocated()/(1024**3):.2f} GB")
+            print(f"Current reserved: {torch.cuda.memory_reserved()/(1024**3):.2f} GB")
+        
+        # Print top 5 CUDA kernels
+        print("\nTop 5 operations by CUDA time:")
+        
+        # Sort events by CUDA time
+        sorted_events = []
+        for evt in events:
+            cuda_time = 0
+            for attr in ['self_cuda_time_total', 'cuda_time_total']:
+                if hasattr(evt, attr):
+                    val = getattr(evt, attr)
+                    if val is not None:
+                        cuda_time = val
+                        break
+            
+            sorted_events.append((evt.key, cuda_time))
+        
+        sorted_events.sort(key=lambda x: x[1], reverse=True)
+        
+        for i, (key, cuda_time) in enumerate(sorted_events[:5]):
+            if cuda_time > 0:
+                print(f"  {i+1}. {key[:60]}: {cuda_time/1000:.3f}ms")
+        
+        # Print memory operations
+        print("\nMemory operations:")
+        mem_ops = ['cudaMalloc', 'cudaMemcpy', 'cudaFree']
+        for op in mem_ops:
+            op_time = 0
+            for evt in events:
+                if op in evt.key:
+                    for attr in ['self_cuda_time_total', 'cuda_time_total']:
+                        if hasattr(evt, attr):
+                            val = getattr(evt, attr)
+                            if val is not None:
+                                op_time += val
+                                break
+            if op_time > 0:
+                print(f"  {op}: {op_time/1000:.3f}ms")
+        
+        # Export operator stats
+        export_operator_stats_fixed(prof, TrainingConfig.file_name)
         
     except Exception as e:
-        print(f"Note: Could not print full table: {e}")
-        # Fallback to manual printing
-        key_avgs = prof.key_averages()
-        
-        # Print summary with safe attribute access
-        print(f"\nTotal events: {len(key_avgs)}")
-        
-        # Group by operator type
-        op_types = {}
-        for evt in key_avgs:
-            op_name = evt.key.split("::")[0] if "::" in evt.key else evt.key
-            cuda_time = getattr(evt, 'self_cuda_time_total', 
-                               getattr(evt, 'cuda_time_total', 
-                                      getattr(evt, 'cuda_time', 0)))
-            op_types[op_name] = op_types.get(op_name, 0) + cuda_time
-        
-        print("\nOperator time distribution:")
-        for op, time in sorted(op_types.items(), key=lambda x: x[1], reverse=True)[:10]:
-            print(f"  {op}: {time/1000:.2f}ms")
+        print(f"Error in profiling summary: {e}")
+        import traceback
+        traceback.print_exc()
 
-            
+
+
+
 def get_profiling_metrics(prof):
-    """Extract profiling metrics for wandb logging"""
+    """Completely fixed version - no attribute errors"""
     metrics = {}
     
     try:
-        key_avgs = prof.key_averages()
+        # Always include basic memory metrics
+        if torch.cuda.is_available():
+            metrics.update({
+                "memory/allocated_gb": torch.cuda.memory_allocated() / (1024**3),
+                "memory/reserved_gb": torch.cuda.memory_reserved() / (1024**3),
+                "memory/max_allocated_gb": torch.cuda.max_memory_allocated() / (1024**3),
+            })
         
-        # Track key operations
-        important_ops = ["aten::matmul", "aten::linear", "aten::layer_norm", 
-                        "aten::attention", "aten::convolution", "aten::cudnn_convolution"]
-        
-        for op in important_ops:
-            op_time = sum(evt.cuda_time_total for evt in key_avgs if op in evt.key)
-            if op_time > 0:
-                metrics[f"prof/{op}_time_ms"] = op_time
-        
-        # Memory metrics
-        metrics.update({
-            "prof/total_cuda_time_ms": prof.total_average().cuda_time_total,
-            "prof/total_cpu_time_ms": prof.total_average().cpu_time_total,
-            "prof/cuda_cpu_ratio": prof.total_average().cuda_time_total / max(prof.total_average().cpu_time_total, 1e-9),
-        })
-        
+        # Try to get profiling events
+        try:
+            events = prof.key_averages()
+            
+            if events:
+                # Count events and operations
+                event_count = len(events)
+                total_ops = 0
+                
+                # Calculate totals
+                total_cpu = 0
+                total_cuda = 0
+                
+                for evt in events:
+                    # Count operations
+                    count = getattr(evt, 'count', 1)
+                    total_ops += count
+                    
+                    # Get CPU time safely
+                    cpu_time = 0
+                    for attr in ['self_cpu_time_total', 'cpu_time_total']:
+                        if hasattr(evt, attr):
+                            val = getattr(evt, attr)
+                            if val is not None:
+                                cpu_time = val
+                                break
+                    total_cpu += cpu_time
+                    
+                    # Get CUDA time safely
+                    cuda_time = 0
+                    for attr in ['self_cuda_time_total', 'cuda_time_total']:
+                        if hasattr(evt, attr):
+                            val = getattr(evt, attr)
+                            if val is not None:
+                                cuda_time = val
+                                break
+                    total_cuda += cuda_time
+                
+                # Add metrics
+                metrics.update({
+                    "prof/events_count": event_count,
+                    "prof/total_operations": total_ops,
+                    "prof/total_cpu_time_ms": total_cpu / 1000,
+                    "prof/total_cuda_time_ms": total_cuda / 1000,
+                })
+                
+                if total_cpu > 0:
+                    metrics["prof/cuda_cpu_ratio"] = total_cuda / total_cpu
+                
+                # Categorize some operations
+                categories = {
+                    'matmul': 0,
+                    'attention': 0,
+                    'layernorm': 0,
+                    'communication': 0,
+                }
+                
+                for evt in events:
+                    key = evt.key.lower()
+                    
+                    # Get time for this event
+                    cuda_time = 0
+                    for attr in ['self_cuda_time_total', 'cuda_time_total']:
+                        if hasattr(evt, attr):
+                            val = getattr(evt, attr)
+                            if val is not None:
+                                cuda_time = val
+                                break
+                    
+                    # Categorize
+                    if any(x in key for x in ['matmul', 'mm', 'bmm']):
+                        categories['matmul'] += cuda_time
+                    elif any(x in key for x in ['attention', 'softmax']):
+                        categories['attention'] += cuda_time
+                    elif any(x in key for x in ['layer_norm', 'layernorm']):
+                        categories['layernorm'] += cuda_time
+                    elif any(x in key for x in ['all_reduce', 'broadcast', 'nccl']):
+                        categories['communication'] += cuda_time
+                
+                # Add category metrics
+                for category, time in categories.items():
+                    if time > 0:
+                        metrics[f"prof/{category}_time_ms"] = time / 1000
+                        
+        except Exception as inner_e:
+            metrics["prof/events_error"] = 1
+            
     except Exception as e:
-        print(f"Warning: Could not extract profiling metrics: {e}")
+        # If everything fails, at least return memory metrics
+        metrics = {
+            "prof/error": 1,
+            "memory/allocated_gb": torch.cuda.memory_allocated() / (1024**3) if torch.cuda.is_available() else 0,
+        }
     
     return metrics
 
-def export_operator_stats(prof, filename):
-    """Export detailed operator statistics to CSV"""
-    import csv
-    
-    key_avgs = prof.key_averages()
-    
-    with open(f"{filename}_operator_stats.csv", 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Operator', 'CPU Time (ms)', 'CUDA Time (ms)', 'Count', 
-                        'CPU Memory (bytes)', 'CUDA Memory (bytes)'])
-        
-        for evt in key_avgs:
-            writer.writerow([
-                evt.key,
-                evt.cpu_time_total,
-                evt.cuda_time_total,
-                evt.count,
-                evt.cpu_memory_usage,
-                evt.cuda_memory_usage
-            ])
-    
-    print(f"Operator statistics exported to {filename}_operator_stats.csv")
 
 # Add profiling configuration to your TrainingConfig or as separate config
 ProfilingConfig = {
