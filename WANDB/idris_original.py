@@ -2040,7 +2040,8 @@ def tokenize_and_save():
     
     print("Tokenizing dataset...")
     enc = tiktoken.get_encoding("gpt2")
-    tokens = enc.encode(text)
+    # tokens = enc.encode(text)
+    tokens = enc.encode(text, allowed_special="all")
     tokens = np.array(tokens, dtype=np.uint16)
     n = int(0.9 * len(tokens))
     train_data = tokens[:n]
