@@ -1,3 +1,5 @@
+%%writefile idris_code.py
+
 
 import wandb
 from datetime import datetime
@@ -1530,6 +1532,9 @@ class LLM(nn.Module):
 
     #     return n_params, active_params
 
+
+
+
     def get_num_params(self):
         """Returns the total number of parameters and active parameters in the model."""
         n_params = sum(p.numel() for p in self.parameters())
@@ -1807,16 +1812,16 @@ ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
     block_size = 2**10,
-    n_embd = 256, 
+    n_embd = 768, 
     pos_emb = 'rope',
     
     # MoE
     moe = True,
 
-    up_dim = 512, 
+    up_dim = 1536, 
     non_linearity = 'swiglu',  
     dropout=0.0,
-    n_layer = 6,
+    n_layer = 12,
 
     n_exp = 16,
     n_shared = 2,
@@ -1828,7 +1833,10 @@ ModelConfig = LLMconfig(
     gamma = 0.001,
 
     # Attention
-    attn = 'mla', 
+    attn = 'gqa', 
+
+
+    
     n_head = 8,
     n_kv_heads=4,
     # MHLA
@@ -1841,6 +1849,8 @@ ModelConfig = LLMconfig(
     ep_group=None,
     
     act_recomp=TrainingConfig.act_recomp)
+
+
 
 # ___________ CLI-OVERRIDE__________________
 def init_distributed():
@@ -1960,6 +1970,7 @@ for key, value in vars(args).items():
             setattr(ModelConfig, key, value)
 # Initialize wandb only on master process
 
+print('ModelConfig ->>>>>>', ModelConfig.n_layer)
 
 if tp_code == 1:
     # Add TP config to ModelConfig
@@ -3550,205 +3561,1076 @@ ProfilingConfig = {
     'on_trace_ready': profiler.tensorboard_trace_handler('./logs'),
 }
 
-# Modified training loop with profiling
-if ep_code == 1:
-    if __name__ == "__main__":
-        main()
-else:
-    if tp_code == 1:
-        if master_process:
-            x, y = train_loader.next_batch()
+
+# # Add these imports if not already present
+# import torch.profiler as profiler
+# from torch.profiler import profile, record_function, ProfilerActivity
+# import numpy as np
+
+# Add this to your config section
+GPUConfig = {
+    'model': 'A40',
+    'peak_tflops': 149.7,  # Theoretical peak TFLOPS for A40 with FP16 Tensor Cores
+    'precision': torch_dtype,
+    'num_gpus': 8,  # Will be set based on your run
+}
+
+
+
+
+# def calculate_model_flops(model, batch_size, seq_length, grad_accum_steps):
+#     """
+#     Calculate theoretical FLOPs for one forward+backward pass.
+#     Accounts for multi-GPU parallelization.
+#     """
+#     # Count total parameters
+#     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+#     # For transformer: ~6 FLOPs per parameter per token
+#     # 2 FLOPs for forward (matmul), 4 FLOPs for backward (gradient calculation)
+#     flops_per_token = 6 * total_params
+#     total_flops = flops_per_token * batch_size * seq_length * grad_accum_steps
+    
+#     return total_flops, total_params
+
+# def calculate_mfu(flops_achieved, time_seconds, gpu_peak_tflops, num_gpus):
+#     """
+#     Calculate Model FLOP Utilization (MFU) for multi-GPU setup.
+    
+#     Args:
+#         flops_achieved: Total FLOPs across all GPUs
+#         time_seconds: Time for the iteration
+#         gpu_peak_tflops: Peak TFLOPS per GPU
+#         num_gpus: Number of GPUs used
+#     """
+#     # Convert achieved FLOPs to TFLOPS
+#     tflops_achieved = flops_achieved / (1e12 * time_seconds)
+    
+#     # Total peak TFLOPS across all GPUs
+#     total_peak_tflops = gpu_peak_tflops * num_gpus
+    
+#     # Calculate MFU percentage
+#     mfu_percentage = (tflops_achieved / total_peak_tflops) * 100
+    
+#     return mfu_percentage, tflops_achieved
+
+
+    
+# # Calculate model FLOPs once - add this after model initialization
+# if master_process:
+#     total_flops_per_iter, total_params = calculate_model_flops(
+#         model, 
+#         B,  # batch_size
+#         T,  # sequence_length
+#         grad_accum_steps
+#     )
+    
+#     # Set number of GPUs based on your configuration
+#     GPUConfig['num_gpus'] = world_size
+    
+#     print(f"╔{'═'*60}╗")
+#     print(f"║{'MFU Configuration':^60}║")
+#     print(f"╠{'═'*60}╣")
+#     print(f"║ {'Model parameters:':<30} {total_params:,} ║")
+#     print(f"║ {'FLOPs per iteration:':<30} {total_flops_per_iter / 1e12:>10.2f} TFLOPS ║")
+#     print(f"║ {'Theoretical GPU peak (per GPU):':<30} {GPUConfig['peak_tflops']:>10.2f} TFLOPS ║")
+#     print(f"║ {'Number of GPUs:':<30} {GPUConfig['num_gpus']:>10} ║")
+#     print(f"║ {'Total peak TFLOPS:':<30} {GPUConfig['peak_tflops'] * GPUConfig['num_gpus']:>10.2f} TFLOPS ║")
+#     print(f"╚{'═'*60}╝")
+
+
+# # Modified training loop with profiling
+# if ep_code == 1:
+#     if __name__ == "__main__":
+#         main()
+# else:
+#     if tp_code == 1:
+#         if master_process:
+#             x, y = train_loader.next_batch()
+#         else:
+#             x = torch.empty(B, T, dtype=torch.long, device=device)
+#             y = torch.empty(B, T, dtype=torch.long, device=device)
+#         x, y = broadcast_batch(x, y, src=0)
+#     else:
+#         x, y = train_loader.next_batch()
+
+
+
+#     loss_stats = []
+#     mfu_stats = []  # Add this to track MFU
+#     iteration_times = []  # Track iteration times
+#     total_tokens_processed = 0  # Track tokens for throughput calculation
+
+#     # Warmup iterations (skip MFU calculation for first few iters)
+#     warmup_iters = 5
+    
+#     # Initialize profiler
+#     if ProfilingConfig['active'] and master_process:
+#         prof = profiler.profile(
+#             activities=ProfilingConfig['activities'],
+#             schedule=ProfilingConfig['schedule'],
+#             on_trace_ready=ProfilingConfig['on_trace_ready'],
+#             record_shapes=ProfilingConfig['record_shapes'],
+#             profile_memory=ProfilingConfig['profile_memory'],
+#             with_stack=ProfilingConfig['with_stack'],
+#             with_flops=True,  # Add FLOPs counting
+#             with_modules=True,  # Track module hierarchy
+#         )
+#         prof.start()
+    
+#     for iter in range(TrainingConfig.max_iters+1):
+#         t0 = perf_counter()
+#         iteration_start_time = t0
+
+#         if iter % 100 == 0:
+#             print_all_gpu_memory(f"Iteration {iter}")
+
+#         lr = get_lr(iter, TrainingConfig) 
+#         for param_grp in optimizer.param_groups:
+#             param_grp['lr'] = lr
+        
+#         optimizer.zero_grad(set_to_none=True)
+
+#         a, b = 0, 0
+#         if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
+#             a = perf_counter()
+#             losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+#             b = perf_counter()
+#             if master_process:
+#                 print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+#             t0 = b
+
+#         # Step profiler at the beginning of iteration
+#         if ProfilingConfig['active'] and master_process:
+#             prof.step()
+
+#         for micro_step in range(grad_accum_steps):
+#             if tp_code == 1 or cp_code == 2:
+#                 if master_process:
+#                     x, y = train_loader.next_batch()
+#                 else:
+#                     x = torch.empty(B, T, dtype=torch.long, device=device)
+#                     y = torch.empty(B, T, dtype=torch.long, device=device)
+                
+#                 x, y = broadcast_batch(x, y, src=0)
+                
+#                 # Profile the forward/backward pass
+#                 with torch.cuda.amp.autocast(dtype=torch_dtype):
+#                     with profiler.record_function("forward_pass"):
+#                         _, loss, _ = model(x, y)
+#                         loss = loss / grad_accum_steps
+
+#                 with profiler.record_function("backward_pass"):
+#                     scaler.scale(loss).backward()
+
+#             else:
+#                 model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+
+#                 with ctx:
+#                     # Profile forward pass
+#                     with profiler.record_function("model_forward"):
+#                         _, loss, _ = model(x, y)
+#                         loss = loss / grad_accum_steps
+
+#                 x, y = train_loader.next_batch()
+#                 loss_stats.append(loss.cpu())
+                
+#                 # Profile backward pass
+#                 with profiler.record_function("loss_backward"):
+#                     scaler.scale(loss).backward()
+
+#         # Profile gradient clipping
+#         if TrainingConfig.grad_clip != 0.0:
+#             with profiler.record_function("gradient_clipping"):
+#                 scaler.unscale_(optimizer)
+#                 torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
+
+#         # Profile optimizer step
+#         with profiler.record_function("optimizer_step"):
+#             scaler.step(optimizer)
+#             scaler.update()
+
+        
+
+#         if master_process:
+#             torch.cuda.synchronize()
+#             dt = (perf_counter() - t0) * 1000
+            
+#             # Log profiling metrics periodically
+#             if ProfilingConfig['active'] and iter % 100 == 0 and iter > 10:
+#                 # print_profiling_stats(prof)
+#                 print_profiling_summary(prof)
+            
+#             print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
+
+#             if use_wandb:
+#                 log_data = {
+#                     "train/loss": loss.item() * grad_accum_steps if 'loss' in locals() else 0,
+#                     "train/lr": lr,
+#                     "train/step": iter,
+#                     "perf/iteration_time_ms": dt if 'dt' in locals() else 0,
+#                     "perf/throughput_tokens_per_sec": (B * T * grad_accum_steps * world_size) / (dt / 1000) if 'dt' in locals() else 0,
+#                 }
+                
+#                 # Add profiling metrics to wandb
+#                 if ProfilingConfig['active'] and iter % 50 == 0:
+#                     prof_metrics = get_profiling_metrics(prof)
+#                     log_data.update(prof_metrics)
+                
+#                 # Add memory usage
+#                 if torch.cuda.is_available():
+#                     log_data.update({
+#                         "memory/allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
+#                         "memory/reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
+#                         "memory/max_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
+#                         "memory/active_gb": torch.cuda.memory_stats(device).get("active_bytes.all.current", 0) / (1024**3),
+#                         "memory/inactive_gb": torch.cuda.memory_stats(device).get("inactive_split_bytes.all.current", 0) / (1024**3),
+#                     })
+                
+#                 wandb.log(log_data)
+
+#     # Stop and analyze profiler
+#     if ProfilingConfig['active'] and master_process:
+#         prof.stop()
+        
+#         # Print key profiling insights
+#         print("\n" + "="*80)
+#         print("PROFILING SUMMARY")
+#         print("="*80)
+        
+#         # CPU/GPU time breakdown
+#         print(f"\nTotal CPU time: {prof.total_average().cpu_time_total:.3f}ms")
+#         print(f"Total CUDA time: {prof.total_average().cuda_time_total:.3f}ms")
+        
+#         # Memory usage
+#         if ProfilingConfig['profile_memory']:
+#             print(f"\nPeak CUDA memory: {prof.total_average().cuda_memory_usage / (1024**2):.2f} MB")
+        
+#         # Key kernels
+#         print("\nTop 5 CUDA kernels by time:")
+#         for evt in prof.key_averages().sort_by("cuda_time_total"):
+#             if evt.key in ["cudaMalloc", "cudaMemcpy", "cudaFree"]:
+#                 print(f"  {evt.key}: {evt.cuda_time_total:.3f}ms")
+        
+#         # Save profiling results
+#         prof.export_chrome_trace(f"profile_trace_{TrainingConfig.file_name}.json")
+#         print(f"\nTrace saved to: profile_trace_{TrainingConfig.file_name}.json")
+        
+#         # Export operator statistics
+#         export_operator_stats(prof, TrainingConfig.file_name)
+    
+#     destroy_process_group()
+#     if use_wandb and master_process:
+#         wandb.finish()
+
+#     if TrainingConfig.save_model and master_process and False: # For now lets not save the trash model
+#         if ddp_flag==1:
+#             print('inside ddp_flag = 1')
+#             checkpoint = {'config': ModelConfig, 'model_state': raw_model.state_dict(), 'iter_num':iter, 'last_loss':losses, 'train_losses':loss_stats} 
+#             torch.save(checkpoint, 'llm_model.pt')
+#             print("checkpoint saved to llm_model.pt")
+#         elif ddp_flag == 2 or cp_code == 1:
+#             print('inside ddp_flag = 2 or cp_code = 1')
+#             save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+
+#             with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+#                 cpu_state_dict = model.state_dict()
+
+#             checkpoint = {'model_config': ModelConfig, 'train_config': TrainingConfig, 'model_state': cpu_state_dict}  # Use the gathered state dict
+#             torch.save(checkpoint, TrainingConfig.file_name + '_ckpt.pt')
+#             print("Model checkpoint saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
+
+#             loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
+#             stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+#             torch.save(stats, TrainingConfig.file_name+'_stats.pt')
+#             print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
+
+
+#     if tp_code == 1:
+#         # Cleanup
+#         if dist.is_initialized():
+#             dist.destroy_process_group()
+
+
+"""
+Complete Training Loop with Model FLOP Utilization (MFU) Implementation
+for NVIDIA A40 GPU with 2/4/8 GPU Distributed Training
+"""
+
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+from torch.distributed import init_process_group, destroy_process_group
+import torch.cuda.amp as amp
+from torch.profiler import profile, record_function, ProfilerActivity
+import torch.profiler as profiler
+import numpy as np
+import wandb
+from time import perf_counter
+import math
+from typing import Dict, List, Tuple, Optional
+import json
+import os
+from pathlib import Path
+
+# ============================================================================
+# CONFIGURATION SECTION
+# ============================================================================
+
+class MFUConfig:
+    """Configuration for Model FLOP Utilization tracking"""
+    def __init__(self):
+        # A40 GPU Specifications (NVIDIA A40)
+        self.gpu_model = "A40"
+        self.peak_tflops_fp16 = 149.7  # Theoretical peak TFLOPS for A40 with FP16 Tensor Cores
+        self.peak_tflops_fp32 = 37.4   # Theoretical peak TFLOPS for A40 with FP32
+        self.memory_size_gb = 48       # 48GB GDDR6
+        self.memory_bandwidth_gb = 696  # GB/s
+        
+        # MFU Tracking
+        self.track_mfu = True
+        self.warmup_iterations = 5
+        self.mfu_log_interval = 10
+        self.calculate_communication_overhead = True
+        
+        # Precision mapping
+        self.precision_map = {
+            torch.float32: "fp32",
+            torch.float16: "fp16",
+            torch.bfloat16: "bf16"
+        }
+        
+        # Multi-GPU settings (will be updated at runtime)
+        self.num_gpus = 1
+        self.parallel_type = "ddp"  # ddp, fsdp, tp
+        
+        # Communication overhead factors (empirically determined)
+        self.comm_overhead_factors = {
+            "ddp": 0.05,   # 5% overhead
+            "fsdp": 0.10,  # 10% overhead
+            "tp": 0.15,    # 15% overhead
+            "pp": 0.20,    # 20% overhead
+        }
+
+class MFUTracker:
+    """
+    Tracks Model FLOP Utilization (MFU) during training
+    """
+    
+    def __init__(self, config: MFUConfig):
+        self.config = config
+        self.reset()
+        
+    def reset(self):
+        """Reset all tracking variables"""
+        self.mfu_stats = []
+        self.iteration_times = []
+        self.computation_times = []
+        self.communication_times = []
+        self.fwd_bwd_times = []
+        self.optimizer_times = []
+        self.total_tokens_processed = 0
+        self.total_flops_processed = 0
+        self.start_time = None
+        self.iteration_count = 0
+        
+    def start_iteration(self):
+        """Mark the start of an iteration"""
+        self.iteration_start = perf_counter()
+        
+    def record_computation_start(self):
+        """Mark the start of computation phase"""
+        self.computation_start = perf_counter()
+        
+    def record_computation_end(self):
+        """Mark the end of computation phase"""
+        self.computation_end = perf_counter()
+        self.computation_times.append(self.computation_end - self.computation_start)
+        
+    def record_communication_start(self):
+        """Mark the start of communication phase"""
+        self.communication_start = perf_counter()
+        
+    def record_communication_end(self):
+        """Mark the end of communication phase"""
+        self.communication_end = perf_counter()
+        self.communication_times.append(self.communication_end - self.communication_start)
+        
+    def record_fwd_bwd_start(self):
+        """Mark the start of forward+backward pass"""
+        self.fwd_bwd_start = perf_counter()
+        
+    def record_fwd_bwd_end(self):
+        """Mark the end of forward+backward pass"""
+        self.fwd_bwd_end = perf_counter()
+        self.fwd_bwd_times.append(self.fwd_bwd_end - self.fwd_bwd_start)
+        
+    def record_optimizer_start(self):
+        """Mark the start of optimizer step"""
+        self.optimizer_start = perf_counter()
+        
+    def record_optimizer_end(self):
+        """Mark the end of optimizer step"""
+        self.optimizer_end = perf_counter()
+        self.optimizer_times.append(self.optimizer_end - self.optimizer_start)
+        
+    def end_iteration(self, tokens_processed: int, flops_per_iter: float):
+        """Mark the end of an iteration and calculate metrics"""
+        self.iteration_end = perf_counter()
+        iteration_time = self.iteration_end - self.iteration_start
+        
+        self.iteration_times.append(iteration_time)
+        self.total_tokens_processed += tokens_processed
+        self.total_flops_processed += flops_per_iter
+        self.iteration_count += 1
+        
+        return iteration_time
+    
+    def calculate_mfu(self, flops_achieved: float, time_seconds: float, 
+                     precision: torch.dtype, num_gpus: int = None) -> Tuple[float, float]:
+        """
+        Calculate Model FLOP Utilization (MFU)
+        
+        Args:
+            flops_achieved: Total FLOPs across all GPUs
+            time_seconds: Time taken for the operation
+            precision: Torch dtype used for computation
+            num_gpus: Number of GPUs used (defaults to config value)
+            
+        Returns:
+            Tuple of (mfu_percentage, achieved_tflops)
+        """
+        if num_gpus is None:
+            num_gpus = self.config.num_gpus
+            
+        # Convert achieved FLOPs to TFLOPS
+        tflops_achieved = flops_achieved / (1e12 * time_seconds)
+        
+        # Get appropriate peak TFLOPS based on precision
+        precision_str = self.config.precision_map.get(precision, "fp32")
+        if precision_str in ["fp16", "bf16"]:
+            peak_tflops = self.config.peak_tflops_fp16
         else:
-            x = torch.empty(B, T, dtype=torch.long, device=device)
-            y = torch.empty(B, T, dtype=torch.long, device=device)
-        x, y = broadcast_batch(x, y, src=0)
-    else:
-        x, y = train_loader.next_batch()
-
-    loss_stats = []
-    
-    # Initialize profiler
-    if ProfilingConfig['active'] and master_process:
-        prof = profiler.profile(
-            activities=ProfilingConfig['activities'],
-            schedule=ProfilingConfig['schedule'],
-            on_trace_ready=ProfilingConfig['on_trace_ready'],
-            record_shapes=ProfilingConfig['record_shapes'],
-            profile_memory=ProfilingConfig['profile_memory'],
-            with_stack=ProfilingConfig['with_stack'],
-            with_flops=True,  # Add FLOPs counting
-            with_modules=True,  # Track module hierarchy
-        )
-        prof.start()
-    
-    for iter in range(TrainingConfig.max_iters+1):
-        t0 = perf_counter()
-
-        if iter % 100 == 0:
-            print_all_gpu_memory(f"Iteration {iter}")
-
-        lr = get_lr(iter, TrainingConfig) 
-        for param_grp in optimizer.param_groups:
-            param_grp['lr'] = lr
-        
-        optimizer.zero_grad(set_to_none=True)
-
-        a, b = 0, 0
-        if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
-            a = perf_counter()
-            losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-            b = perf_counter()
-            if master_process:
-                print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
-            t0 = b
-
-        # Step profiler at the beginning of iteration
-        if ProfilingConfig['active'] and master_process:
-            prof.step()
-
-        for micro_step in range(grad_accum_steps):
-            if tp_code == 1 or cp_code == 2:
-                if master_process:
-                    x, y = train_loader.next_batch()
-                else:
-                    x = torch.empty(B, T, dtype=torch.long, device=device)
-                    y = torch.empty(B, T, dtype=torch.long, device=device)
-                
-                x, y = broadcast_batch(x, y, src=0)
-                
-                # Profile the forward/backward pass
-                with torch.cuda.amp.autocast(dtype=torch_dtype):
-                    with profiler.record_function("forward_pass"):
-                        _, loss, _ = model(x, y)
-                        loss = loss / grad_accum_steps
-
-                with profiler.record_function("backward_pass"):
-                    scaler.scale(loss).backward()
-
-            else:
-                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-
-                with ctx:
-                    # Profile forward pass
-                    with profiler.record_function("model_forward"):
-                        _, loss, _ = model(x, y)
-                        loss = loss / grad_accum_steps
-
-                x, y = train_loader.next_batch()
-                loss_stats.append(loss.cpu())
-                
-                # Profile backward pass
-                with profiler.record_function("loss_backward"):
-                    scaler.scale(loss).backward()
-
-        # Profile gradient clipping
-        if TrainingConfig.grad_clip != 0.0:
-            with profiler.record_function("gradient_clipping"):
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
-
-        # Profile optimizer step
-        with profiler.record_function("optimizer_step"):
-            scaler.step(optimizer)
-            scaler.update()
-
-        
-
-        if master_process:
-            torch.cuda.synchronize()
-            dt = (perf_counter() - t0) * 1000
+            peak_tflops = self.config.peak_tflops_fp32
             
-            # Log profiling metrics periodically
-            if ProfilingConfig['active'] and iter % 100 == 0 and iter > 10:
-                # print_profiling_stats(prof)
-                print_profiling_summary(prof)
-            
-            print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
-
-            if use_wandb:
-                log_data = {
-                    "train/loss": loss.item() * grad_accum_steps if 'loss' in locals() else 0,
-                    "train/lr": lr,
-                    "train/step": iter,
-                    "perf/iteration_time_ms": dt if 'dt' in locals() else 0,
-                    "perf/throughput_tokens_per_sec": (B * T * grad_accum_steps * world_size) / (dt / 1000) if 'dt' in locals() else 0,
-                }
-                
-                # Add profiling metrics to wandb
-                if ProfilingConfig['active'] and iter % 50 == 0:
-                    prof_metrics = get_profiling_metrics(prof)
-                    log_data.update(prof_metrics)
-                
-                # Add memory usage
-                if torch.cuda.is_available():
-                    log_data.update({
-                        "memory/allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
-                        "memory/reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
-                        "memory/max_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
-                        "memory/active_gb": torch.cuda.memory_stats(device).get("active_bytes.all.current", 0) / (1024**3),
-                        "memory/inactive_gb": torch.cuda.memory_stats(device).get("inactive_split_bytes.all.current", 0) / (1024**3),
-                    })
-                
-                wandb.log(log_data)
-
-    # Stop and analyze profiler
-    if ProfilingConfig['active'] and master_process:
-        prof.stop()
+        # Adjust for parallelization overhead
+        comm_factor = self.config.comm_overhead_factors.get(self.config.parallel_type, 0.05)
+        effective_peak = peak_tflops * num_gpus * (1 - comm_factor)
         
-        # Print key profiling insights
+        # Calculate MFU percentage
+        if effective_peak > 0:
+            mfu_percentage = (tflops_achieved / effective_peak) * 100
+        else:
+            mfu_percentage = 0.0
+            
+        return mfu_percentage, tflops_achieved
+    
+    def calculate_mfu_for_iteration(self, flops_per_iter: float, 
+                                   fwd_bwd_time: float = None,
+                                   precision: torch.dtype = None) -> Tuple[float, float]:
+        """
+        Calculate MFU for a specific iteration
+        
+        Args:
+            flops_per_iter: FLOPs for this iteration
+            fwd_bwd_time: Time for forward+backward (optional)
+            precision: Precision used (optional)
+            
+        Returns:
+            Tuple of (mfu_percentage, achieved_tflops)
+        """
+        if fwd_bwd_time is None and self.fwd_bwd_times:
+            fwd_bwd_time = self.fwd_bwd_times[-1]
+        elif fwd_bwd_time is None:
+            fwd_bwd_time = self.iteration_times[-1] if self.iteration_times else 0
+            
+        if precision is None:
+            # Default to fp16 for mixed precision training
+            precision = torch.float16
+            
+        return self.calculate_mfu(flops_per_iter, fwd_bwd_time, precision)
+    
+    def get_summary(self) -> Dict:
+        """Get comprehensive MFU summary"""
+        if not self.mfu_stats:
+            return {}
+            
+        summary = {
+            "gpu_model": self.config.gpu_model,
+            "num_gpus": self.config.num_gpus,
+            "parallel_type": self.config.parallel_type,
+            "total_iterations": self.iteration_count,
+            "total_tokens": self.total_tokens_processed,
+            "total_flops_petaflops": self.total_flops_processed / 1e15,
+        }
+        
+        if self.iteration_times:
+            summary.update({
+                "avg_iteration_time_ms": np.mean(self.iteration_times) * 1000,
+                "min_iteration_time_ms": np.min(self.iteration_times) * 1000,
+                "max_iteration_time_ms": np.max(self.iteration_times) * 1000,
+                "std_iteration_time_ms": np.std(self.iteration_times) * 1000,
+            })
+            
+        if self.mfu_stats:
+            summary.update({
+                "avg_mfu_percentage": np.mean(self.mfu_stats),
+                "min_mfu_percentage": np.min(self.mfu_stats),
+                "max_mfu_percentage": np.max(self.mfu_stats),
+                "std_mfu_percentage": np.std(self.mfu_stats),
+                "p50_mfu_percentage": np.percentile(self.mfu_stats, 50),
+                "p90_mfu_percentage": np.percentile(self.mfu_stats, 90),
+                "p95_mfu_percentage": np.percentile(self.mfu_stats, 95),
+            })
+            
+        if self.total_tokens_processed > 0 and self.iteration_times:
+            total_time = sum(self.iteration_times)
+            summary.update({
+                "tokens_per_second": self.total_tokens_processed / total_time,
+                "throughput_tflops": self.total_flops_processed / (1e12 * total_time),
+            })
+            
+        if self.computation_times and self.communication_times:
+            avg_comp_time = np.mean(self.computation_times)
+            avg_comm_time = np.mean(self.communication_times)
+            total_time = avg_comp_time + avg_comm_time
+            
+            if total_time > 0:
+                summary.update({
+                    "computation_fraction": avg_comp_time / total_time,
+                    "communication_fraction": avg_comm_time / total_time,
+                    "computation_ms": avg_comp_time * 1000,
+                    "communication_ms": avg_comm_time * 1000,
+                })
+                
+        return summary
+    
+    def print_summary(self):
+        """Print formatted MFU summary"""
+        summary = self.get_summary()
+        if not summary:
+            print("No MFU data available")
+            return
+            
         print("\n" + "="*80)
-        print("PROFILING SUMMARY")
+        print("MODEL FLOP UTILIZATION (MFU) SUMMARY")
         print("="*80)
         
-        # CPU/GPU time breakdown
-        print(f"\nTotal CPU time: {prof.total_average().cpu_time_total:.3f}ms")
-        print(f"Total CUDA time: {prof.total_average().cuda_time_total:.3f}ms")
+        print(f"\nHardware Configuration:")
+        print(f"  GPU Model:           {summary['gpu_model']}")
+        print(f"  Number of GPUs:      {summary['num_gpus']}")
+        print(f"  Parallel Type:       {summary['parallel_type'].upper()}")
         
-        # Memory usage
-        if ProfilingConfig['profile_memory']:
-            print(f"\nPeak CUDA memory: {prof.total_average().cuda_memory_usage / (1024**2):.2f} MB")
+        print(f"\nTraining Statistics:")
+        print(f"  Total Iterations:    {summary['total_iterations']:,}")
+        print(f"  Total Tokens:        {summary['total_tokens']:,}")
+        print(f"  Total PetaFLOPs:     {summary['total_flops_petaflops']:.3f}")
         
-        # Key kernels
-        print("\nTop 5 CUDA kernels by time:")
-        for evt in prof.key_averages().sort_by("cuda_time_total"):
-            if evt.key in ["cudaMalloc", "cudaMemcpy", "cudaFree"]:
-                print(f"  {evt.key}: {evt.cuda_time_total:.3f}ms")
+        print(f"\nPerformance Metrics:")
+        print(f"  Average MFU:         {summary['avg_mfu_percentage']:6.2f}%")
+        print(f"  Best MFU:            {summary['max_mfu_percentage']:6.2f}%")
+        print(f"  Worst MFU:           {summary['min_mfu_percentage']:6.2f}%")
+        print(f"  MFU Std Dev:         {summary['std_mfu_percentage']:6.2f}%")
+        print(f"  MFU P50:             {summary['p50_mfu_percentage']:6.2f}%")
+        print(f"  MFU P90:             {summary['p90_mfu_percentage']:6.2f}%")
         
-        # Save profiling results
-        prof.export_chrome_trace(f"profile_trace_{TrainingConfig.file_name}.json")
-        print(f"\nTrace saved to: profile_trace_{TrainingConfig.file_name}.json")
+        print(f"\nThroughput:")
+        if 'tokens_per_second' in summary:
+            print(f"  Tokens/second:       {summary['tokens_per_second']:,.0f}")
+            print(f"  Achieved TFLOPS:     {summary['throughput_tflops']:.2f}")
+            
+        peak_tflops = self.config.peak_tflops_fp16 * summary['num_gpus']
+        print(f"  Theoretical Peak:    {peak_tflops:.1f} TFLOPS")
         
-        # Export operator statistics
-        export_operator_stats(prof, TrainingConfig.file_name)
+        print(f"\nTiming Breakdown:")
+        print(f"  Avg Iteration Time:  {summary['avg_iteration_time_ms']:.2f}ms")
+        
+        if 'computation_fraction' in summary:
+            print(f"  Computation:         {summary['computation_fraction']*100:.1f}% ({summary['computation_ms']:.2f}ms)")
+            print(f"  Communication:       {summary['communication_fraction']*100:.1f}% ({summary['communication_ms']:.2f}ms)")
+            
+        print("="*80)
+
+# ============================================================================
+# FLOP CALCULATION FUNCTIONS
+# ============================================================================
+
+def calculate_model_flops(model: nn.Module, batch_size: int, seq_length: int, 
+                         grad_accum_steps: int = 1, include_embedding: bool = True,
+                         include_attention: bool = True) -> Tuple[float, int]:
+    """
+    Calculate theoretical FLOPs for transformer model
     
-    destroy_process_group()
-    if use_wandb and master_process:
-        wandb.finish()
+    Based on: https://arxiv.org/abs/2001.08361
+    FLOPs ≈ 6 * N * tokens (for forward+backward)
+    
+    Args:
+        model: The transformer model
+        batch_size: Batch size per GPU
+        seq_length: Sequence length
+        grad_accum_steps: Gradient accumulation steps
+        include_embedding: Whether to include embedding layer FLOPs
+        include_attention: Whether to include attention FLOPs
+        
+    Returns:
+        Tuple of (total_flops, total_params)
+    """
+    # Count total parameters
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    # Base FLOPs calculation
+    # 2 FLOPs per parameter per token for forward pass
+    # 4 FLOPs per parameter per token for backward pass
+    # Total: 6 FLOPs per parameter per token
+    flops_per_token = 6 * total_params
+    
+    # Adjust for specific layers if needed
+    if not include_embedding:
+        # Estimate embedding layer parameters (vocab_size * hidden_size)
+        # This is approximate and may need adjustment based on your model
+        pass
+        
+    # Total FLOPs for one iteration
+    total_tokens = batch_size * seq_length * grad_accum_steps
+    total_flops = flops_per_token * total_tokens
+    
+    return total_flops, total_params
 
-    if TrainingConfig.save_model and master_process and False: # For now lets not save the trash model
-        if ddp_flag==1:
-            print('inside ddp_flag = 1')
-            checkpoint = {'config': ModelConfig, 'model_state': raw_model.state_dict(), 'iter_num':iter, 'last_loss':losses, 'train_losses':loss_stats} 
-            torch.save(checkpoint, 'llm_model.pt')
-            print("checkpoint saved to llm_model.pt")
+def calculate_mfu_simple(flops_achieved: float, time_seconds: float, 
+                        gpu_peak_tflops: float, num_gpus: int = 1) -> Tuple[float, float]:
+    """
+    Simple MFU calculation without overhead adjustments
+    
+    Args:
+        flops_achieved: Total FLOPs across all GPUs
+        time_seconds: Time taken
+        gpu_peak_tflops: Peak TFLOPS per GPU
+        num_gpus: Number of GPUs
+        
+    Returns:
+        Tuple of (mfu_percentage, achieved_tflops)
+    """
+    tflops_achieved = flops_achieved / (1e12 * time_seconds)
+    total_peak_tflops = gpu_peak_tflops * num_gpus
+    mfu_percentage = (tflops_achieved / total_peak_tflops) * 100 if total_peak_tflops > 0 else 0
+    return mfu_percentage, tflops_achieved
+
+# ============================================================================
+# MODIFIED TRAINING LOOP WITH MFU TRACKING
+# ============================================================================
+
+def train_with_mfu_tracking():
+    """
+    Main training loop with comprehensive MFU tracking
+    """
+    
+    # Initialize MFU tracker
+    mfu_config = MFUConfig()
+    mfu_tracker = MFUTracker(mfu_config)
+    
+    # Calculate model FLOPs once at the beginning
+    if master_process:
+        total_flops_per_iter, total_params = calculate_model_flops(
+            model, 
+            B,  # batch_size
+            T,  # sequence_length
+            grad_accum_steps
+        )
+        
+        # Update GPU configuration
+        mfu_config.num_gpus = world_size
+        
+        # Determine parallel type
+        if tp_code == 1:
+            mfu_config.parallel_type = "tp"
         elif ddp_flag == 2 or cp_code == 1:
-            print('inside ddp_flag = 2 or cp_code = 1')
-            save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            mfu_config.parallel_type = "fsdp"
+        else:
+            mfu_config.parallel_type = "ddp"
+        
+        # Print MFU configuration
+        print_mfu_configuration(mfu_config, total_params, total_flops_per_iter)
+    else:
+        # Initialize variables for non-master processes
+        total_flops_per_iter = 0
+        total_params = 0
+        
+    # # Broadcast FLOPs information to all GPUs if needed
+    # if world_size > 1:
+    #     # In distributed training, each GPU handles a portion of the batch
+    #     # FLOPs per GPU = total_flops_per_iter / world_size
+    #     total_flops_per_iter = total_flops_per_iter / world_size
 
-            with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
-                cpu_state_dict = model.state_dict()
 
-            checkpoint = {'model_config': ModelConfig, 'train_config': TrainingConfig, 'model_state': cpu_state_dict}  # Use the gathered state dict
-            torch.save(checkpoint, TrainingConfig.file_name + '_ckpt.pt')
-            print("Model checkpoint saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
-
-            loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
-            stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
-            torch.save(stats, TrainingConfig.file_name+'_stats.pt')
-            print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
-
-
-    if tp_code == 1:
-        # Cleanup
+    # Broadcast FLOPs information to all GPUs in distributed training
+    if world_size > 1:
+        # First, broadcast total_params to all processes
         if dist.is_initialized():
-            dist.destroy_process_group()
+            total_params_tensor = torch.tensor([total_params], dtype=torch.float32, device=device)
+            dist.broadcast(total_params_tensor, src=0)
+            total_params = int(total_params_tensor.item())
+        
+        # Calculate FLOPs per iteration based on broadcasted parameters
+        # For transformer: FLOPs = 6 * params * tokens
+        tokens_per_iter = B * T * grad_accum_steps
+        total_flops_per_iter = 6 * total_params * tokens_per_iter
+        
+        # In distributed training, each GPU handles a portion of the FLOPs
+        # FLOPs per GPU = total_flops_per_iter / world_size
+        total_flops_per_iter = total_flops_per_iter / world_size
+        
+        # Broadcast the parallel type configuration
+        if dist.is_initialized() and master_process:
+            # Create a tensor to store parallel type
+            if mfu_config.parallel_type == "ddp":
+                parallel_type_code = 0
+            elif mfu_config.parallel_type == "fsdp":
+                parallel_type_code = 1
+            elif mfu_config.parallel_type == "tp":
+                parallel_type_code = 2
+            else:
+                parallel_type_code = 0
+            
+            parallel_type_tensor = torch.tensor([parallel_type_code], dtype=torch.int32, device=device)
+            dist.broadcast(parallel_type_tensor, src=0)
+        
+        if not master_process and dist.is_initialized():
+            # Receive parallel type
+            parallel_type_tensor = torch.tensor([0], dtype=torch.int32, device=device)
+            dist.broadcast(parallel_type_tensor, src=0)
+            parallel_type_code = parallel_type_tensor.item()
+            
+            if parallel_type_code == 0:
+                mfu_config.parallel_type = "ddp"
+            elif parallel_type_code == 1:
+                mfu_config.parallel_type = "fsdp"
+            elif parallel_type_code == 2:
+                mfu_config.parallel_type = "tp"
+    
+    # Modified training loop with profiling
+    if ep_code == 1:
+        if __name__ == "__main__":
+            main()
+    else:
+        if tp_code == 1:
+            if master_process:
+                x, y = train_loader.next_batch()
+            else:
+                x = torch.empty(B, T, dtype=torch.long, device=device)
+                y = torch.empty(B, T, dtype=torch.long, device=device)
+            x, y = broadcast_batch(x, y, src=0)
+        else:
+            x, y = train_loader.next_batch()
+
+        loss_stats = []
+        
+        # Initialize profiler
+        if ProfilingConfig['active'] and master_process:
+            prof = profiler.profile(
+                activities=ProfilingConfig['activities'],
+                schedule=ProfilingConfig['schedule'],
+                on_trace_ready=ProfilingConfig['on_trace_ready'],
+                record_shapes=ProfilingConfig['record_shapes'],
+                profile_memory=ProfilingConfig['profile_memory'],
+                with_stack=ProfilingConfig['with_stack'],
+                with_flops=True,
+                with_modules=True,
+            )
+            prof.start()
+        
+        # Main training loop
+        for iter in range(TrainingConfig.max_iters + 1):
+            # Start iteration timing for MFU
+            mfu_tracker.start_iteration()
+            t0 = perf_counter()
+            
+            if iter % 100 == 0:
+                print_all_gpu_memory(f"Iteration {iter}")
+
+            # Learning rate scheduling
+            lr = get_lr(iter, TrainingConfig) 
+            for param_grp in optimizer.param_groups:
+                param_grp['lr'] = lr
+            
+            optimizer.zero_grad(set_to_none=True)
+
+            # Evaluation if needed
+            a, b = 0, 0
+            if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
+                a = perf_counter()
+                losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+                b = perf_counter()
+                if master_process:
+                    print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+                t0 = b
+
+            # Step profiler
+            if ProfilingConfig['active'] and master_process:
+                prof.step()
+            
+            # Gradient accumulation steps
+            for micro_step in range(grad_accum_steps):
+                if tp_code == 1 or cp_code == 2:
+                    if master_process:
+                        x, y = train_loader.next_batch()
+                    else:
+                        x = torch.empty(B, T, dtype=torch.long, device=device)
+                        y = torch.empty(B, T, dtype=torch.long, device=device)
+                    
+                    x, y = broadcast_batch(x, y, src=0)
+                    
+                    # Start timing forward+backward for MFU
+                    if mfu_config.track_mfu and iter > mfu_config.warmup_iterations:
+                        mfu_tracker.record_fwd_bwd_start()
+                    
+                    with torch.cuda.amp.autocast(dtype=torch_dtype):
+                        with profiler.record_function("forward_pass"):
+                            _, loss, _ = model(x, y)
+                            loss = loss / grad_accum_steps
+
+                    with profiler.record_function("backward_pass"):
+                        scaler.scale(loss).backward()
+                        
+                    # End timing forward+backward for MFU
+                    if mfu_config.track_mfu and iter > mfu_config.warmup_iterations:
+                        mfu_tracker.record_fwd_bwd_end()
+
+                else:
+                    model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+                    
+                    # Start timing forward+backward for MFU
+                    if mfu_config.track_mfu and iter > mfu_config.warmup_iterations:
+                        mfu_tracker.record_fwd_bwd_start()
+
+                    with ctx:
+                        with profiler.record_function("model_forward"):
+                            _, loss, _ = model(x, y)
+                            loss = loss / grad_accum_steps
+
+                    x, y = train_loader.next_batch()
+                    loss_stats.append(loss.cpu())
+                    
+                    with profiler.record_function("loss_backward"):
+                        scaler.scale(loss).backward()
+                        
+                    # End timing forward+backward for MFU
+                    if mfu_config.track_mfu and iter > mfu_config.warmup_iterations:
+                        mfu_tracker.record_fwd_bwd_end()
+
+            # Gradient clipping
+            if TrainingConfig.grad_clip != 0.0:
+                with profiler.record_function("gradient_clipping"):
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
+
+            # Optimizer step
+            with profiler.record_function("optimizer_step"):
+                scaler.step(optimizer)
+                scaler.update()
+            
+            # Calculate MFU for this iteration
+            if mfu_config.track_mfu and iter > mfu_config.warmup_iterations:
+                # Calculate tokens processed
+                tokens_this_iter = B * T * grad_accum_steps * mfu_config.num_gpus
+                
+                # End iteration timing
+                iteration_time = mfu_tracker.end_iteration(tokens_this_iter, total_flops_per_iter)
+                
+                # Calculate MFU
+                if mfu_tracker.fwd_bwd_times:
+                    fwd_bwd_time = mfu_tracker.fwd_bwd_times[-1]
+                    mfu_percentage, achieved_tflops = mfu_tracker.calculate_mfu_for_iteration(
+                        total_flops_per_iter, fwd_bwd_time, torch_dtype
+                    )
+                    mfu_tracker.mfu_stats.append(mfu_percentage)
+                    
+                    # Log MFU periodically
+                    if master_process and iter % mfu_config.mfu_log_interval == 0:
+                        avg_mfu_recent = np.mean(mfu_tracker.mfu_stats[-min(20, len(mfu_tracker.mfu_stats)):])
+                        print(f"Iter {iter:6d} | MFU: {mfu_percentage:6.2f}% | "
+                              f"Avg (20): {avg_mfu_recent:6.2f}% | "
+                              f"TFLOPS: {achieved_tflops:7.1f}")
+            
+            # Master process logging
+            if master_process:
+                torch.cuda.synchronize()
+                dt = (perf_counter() - t0) * 1000
+                
+                # Log profiling metrics
+                if ProfilingConfig['active'] and iter % 100 == 0 and iter > 10:
+                    print_profiling_summary(prof)
+                
+                print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
+
+                if use_wandb:
+                    log_data = {
+                        "train/loss": loss.item() * grad_accum_steps if 'loss' in locals() else 0,
+                        "train/lr": lr,
+                        "train/step": iter,
+                        "perf/iteration_time_ms": dt if 'dt' in locals() else 0,
+                        "perf/throughput_tokens_per_sec": (B * T * grad_accum_steps * world_size) / (dt / 1000) if 'dt' in locals() else 0,
+                    }
+                    
+                    # Add MFU metrics to wandb
+                    if mfu_config.track_mfu and iter > mfu_config.warmup_iterations and 'mfu_percentage' in locals():
+                        log_data.update({
+                            "perf/mfu_percentage": mfu_percentage,
+                            "perf/achieved_tflops": achieved_tflops,
+                            "perf/avg_mfu_20iter": avg_mfu_recent if 'avg_mfu_recent' in locals() else mfu_percentage,
+                        })
+                    
+                    # Add profiling metrics
+                    if ProfilingConfig['active'] and iter % 50 == 0:
+                        prof_metrics = get_profiling_metrics(prof)
+                        log_data.update(prof_metrics)
+                    
+                    # Add memory usage
+                    if torch.cuda.is_available():
+                        log_data.update({
+                            "memory/allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
+                            "memory/reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
+                            "memory/max_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
+                            "memory/active_gb": torch.cuda.memory_stats(device).get("active_bytes.all.current", 0) / (1024**3),
+                            "memory/inactive_gb": torch.cuda.memory_stats(device).get("inactive_split_bytes.all.current", 0) / (1024**3),
+                        })
+                    
+                    wandb.log(log_data)
+        
+        # Stop profiler
+        if ProfilingConfig['active'] and master_process:
+            prof.stop()
+            print_profiling_summary_detailed(prof)
+        
+        # Print MFU summary
+        if master_process and mfu_config.track_mfu:
+            mfu_tracker.print_summary()
+            
+            # Save MFU results to file
+            save_mfu_results(mfu_tracker, TrainingConfig.file_name)
+        
+        # Cleanup
+        destroy_process_group()
+        if use_wandb and master_process:
+            wandb.finish()
+        
+        # Model saving (your existing code)
+        # save_model_if_needed()
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def print_mfu_configuration(config: MFUConfig, total_params: int, total_flops_per_iter: float):
+    """Print MFU configuration in a formatted way"""
+    print(f"\n{'='*80}")
+    print(f"{'MODEL FLOP UTILIZATION (MFU) CONFIGURATION':^80}")
+    print(f"{'='*80}")
+    print(f"{'GPU Model:':<30} {config.gpu_model}")
+    print(f"{'Peak TFLOPS (FP16):':<30} {config.peak_tflops_fp16:.1f}")
+    print(f"{'Memory:':<30} {config.memory_size_gb}GB")
+    print(f"{'Number of GPUs:':<30} {config.num_gpus}")
+    print(f"{'Parallel Type:':<30} {config.parallel_type.upper()}")
+    print(f"{'Model Parameters:':<30} {total_params:,}")
+    print(f"{'FLOPs per Iteration:':<30} {total_flops_per_iter / 1e12:.2f} TFLOPS")
+    print(f"{'Total Peak TFLOPS:':<30} {config.peak_tflops_fp16 * config.num_gpus:.1f}")
+    print(f"{'Expected MFU Range:':<30} 40-60% (good utilization)")
+    print(f"{'='*80}\n")
+
+def save_mfu_results(mfu_tracker: MFUTracker, filename: str):
+    """Save MFU results to JSON file"""
+    if not mfu_tracker.mfu_stats:
+        return
+    
+    results = {
+        "config": {
+            "gpu_model": mfu_tracker.config.gpu_model,
+            "num_gpus": mfu_tracker.config.num_gpus,
+            "parallel_type": mfu_tracker.config.parallel_type,
+        },
+        "summary": mfu_tracker.get_summary(),
+        "detailed_stats": {
+            "mfu_per_iteration": mfu_tracker.mfu_stats,
+            "iteration_times_ms": [t * 1000 for t in mfu_tracker.iteration_times],
+            "fwd_bwd_times_ms": [t * 1000 for t in mfu_tracker.fwd_bwd_times],
+        }
+    }
+    
+    # Save to file
+    output_file = f"{filename}_mfu_results.json"
+    with open(output_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    print(f"MFU results saved to: {output_file}")
+
+def print_profiling_summary_detailed(prof):
+    """Print detailed profiling summary with MFU insights"""
+    print("\n" + "="*80)
+    print("DETAILED PROFILING SUMMARY")
+    print("="*80)
+    
+    # CPU/GPU time breakdown
+    # print(f"\nTotal CPU time: {prof.total_average().cpu_time_total:.3f}ms")
+    # print(f"Total CUDA time: {prof.total_average().cuda_time_total:.3f}ms")
+    
+    # Memory usage
+    if ProfilingConfig.get('profile_memory', False):
+        print(f"\nPeak CUDA memory: {prof.total_average().cuda_memory_usage / (1024**2):.2f} MB")
+    
+    # FLOPs information if available
+    try:
+        total_flops = 0
+        for evt in prof.key_averages():
+            if hasattr(evt, 'flops') and evt.flops:
+                total_flops += evt.flops
+        
+        if total_flops > 0:
+            print(f"\nTotal FLOPs measured: {total_flops / 1e12:.2f} TFLOPS")
+    except:
+        pass
+    
+    # Key kernels
+    print("\nTop 10 CUDA kernels by time:")
+    cuda_events = sorted([evt for evt in prof.key_averages() if evt.cuda_time_total > 0], 
+                         key=lambda x: x.cuda_time_total, reverse=True)[:10]
+    
+    for i, evt in enumerate(cuda_events):
+        print(f"  {i+1:2d}. {evt.key[:60]:<60} {evt.cuda_time_total:8.3f}ms")
+    
+    # Communication operations in distributed training
+    print("\nCommunication Operations:")
+    comm_events = [evt for evt in prof.key_averages() 
+                   if any(keyword in evt.key.lower() for keyword in 
+                         ['all_reduce', 'broadcast', 'scatter', 'gather', 'reduce'])]
+    
+    for evt in comm_events[:5]:
+        print(f"  {evt.key:<60} {evt.cuda_time_total:8.3f}ms")
+    
+    print("="*80)
+
+def optimize_for_a40():
+    """Apply A40-specific optimizations"""
+    print("Applying A40-specific optimizations...")
+    
+    # Enable Tensor Cores
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
+    # Optimize memory allocation
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+    
+    # Enable cuDNN benchmarking for fixed input sizes
+    torch.backends.cudnn.benchmark = True
+    
+    print("A40 optimizations applied successfully!")
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+if __name__ == "__main__":
+    # Apply A40 optimizations
+    if GPUConfig.get('model', '').upper() == 'A40':
+        optimize_for_a40()
+    
+    # Run training with MFU tracking
+    train_with_mfu_tracking()
