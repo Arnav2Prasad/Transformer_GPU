@@ -1602,7 +1602,9 @@ class MoE(nn.Module):
             print('hehehehehehehheheheh')
             return self.tp_forward(x)
 
-        if self.use_cp:
+        
+
+        if self.use_cp or ddp_flag == 2:
             print('Class MoE - forward() - inside if self.use_cp or ddp_flag == 2 or tp_code == 1')
             print('now calling : self.forward_single_gpu(x)')
             return self.forward_single_gpu(x)
