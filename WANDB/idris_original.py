@@ -2021,6 +2021,7 @@ if cp_code == 1:
 # _______________ DATASET _________________
 import os
 
+'''
 def tokenize_and_save():
     # Check if both train.bin and val.bin already exist
     if os.path.exists('train.bin') and os.path.exists('val.bin'):
@@ -2056,7 +2057,31 @@ def tokenize_and_save():
         print(f"Saved {file_path}")
     
     print("Dataset preparation complete!")
+'''
 
+def tokenize_and_save():
+    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # This will raise an error for bad responses (4xx or 5xx)
+        text = response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Error downloading the dataset: {e}")
+        return # Exit the function if download fails
+
+    enc = tiktoken.get_encoding("gpt2")
+    tokens = enc.encode(text)
+    tokens = np.array(tokens, dtype=np.uint16)
+
+    n = int(0.9 * len(tokens))
+    train_data = tokens[:n]
+    val_data = tokens[n:]
+
+    data_splits = {'train': train_data, 'val': val_data}
+    for split, data in data_splits.items():
+        file_path = f'{split}.bin'
+        with open(file_path, 'wb') as f:
+            f.write(data.tobytes())
 
 tokenize_and_save() # Using The Tiny Shakespeare dataset for demo
 
@@ -3234,10 +3259,111 @@ def print_all_gpu_memory(prefix=""):
 print('inital GPU memory')
 print_all_gpu_memory("Initial")
 
+# Add these imports at the top of your file
+import torch.profiler as profiler
+from torch.profiler import tensorboard_trace_handler
+
+def print_profiling_stats(prof):
+    """Print useful profiling statistics"""
+    print("\n" + "-"*60)
+    print("PROFILING STATISTICS")
+    print("-"*60)
+    
+    # Get key averages
+    key_avgs = prof.key_averages()
+    
+    # Print top operations
+    print("\nTop 10 operations by CPU time:")
+    for evt in sorted(key_avgs, key=lambda x: x.cpu_time_total, reverse=True)[:10]:
+        if evt.cpu_time_total > 0:
+            print(f"  {evt.key}: {evt.cpu_time_total:.2f}ms")
+    
+    print("\nTop 10 operations by CUDA time:")
+    for evt in sorted(key_avgs, key=lambda x: x.cuda_time_total, reverse=True)[:10]:
+        if evt.cuda_time_total > 0:
+            print(f"  {evt.key}: {evt.cuda_time_total:.2f}ms")
+    
+    # Memory statistics
+    print(f"\nGPU Memory - Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    print(f"GPU Memory - Reserved: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
+def get_profiling_metrics(prof):
+    """Extract profiling metrics for wandb logging"""
+    metrics = {}
+    
+    try:
+        key_avgs = prof.key_averages()
+        
+        # Track key operations
+        important_ops = ["aten::matmul", "aten::linear", "aten::layer_norm", 
+                        "aten::attention", "aten::convolution", "aten::cudnn_convolution"]
+        
+        for op in important_ops:
+            op_time = sum(evt.cuda_time_total for evt in key_avgs if op in evt.key)
+            if op_time > 0:
+                metrics[f"prof/{op}_time_ms"] = op_time
+        
+        # Memory metrics
+        metrics.update({
+            "prof/total_cuda_time_ms": prof.total_average().cuda_time_total,
+            "prof/total_cpu_time_ms": prof.total_average().cpu_time_total,
+            "prof/cuda_cpu_ratio": prof.total_average().cuda_time_total / max(prof.total_average().cpu_time_total, 1e-9),
+        })
+        
+    except Exception as e:
+        print(f"Warning: Could not extract profiling metrics: {e}")
+    
+    return metrics
+
+def export_operator_stats(prof, filename):
+    """Export detailed operator statistics to CSV"""
+    import csv
+    
+    key_avgs = prof.key_averages()
+    
+    with open(f"{filename}_operator_stats.csv", 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Operator', 'CPU Time (ms)', 'CUDA Time (ms)', 'Count', 
+                        'CPU Memory (bytes)', 'CUDA Memory (bytes)'])
+        
+        for evt in key_avgs:
+            writer.writerow([
+                evt.key,
+                evt.cpu_time_total,
+                evt.cuda_time_total,
+                evt.count,
+                evt.cpu_memory_usage,
+                evt.cuda_memory_usage
+            ])
+    
+    print(f"Operator statistics exported to {filename}_operator_stats.csv")
+
+# Add profiling configuration to your TrainingConfig or as separate config
+ProfilingConfig = {
+    'active': True,  # Turn profiling on/off
+    'profile_memory': True,
+    'record_shapes': True,
+    'with_stack': True,
+    'profile_iters': 20,  # Number of iterations to profile
+    'wait_iters': 5,      # Warmup iterations
+    'warmup_iters': 5,
+    'activities': [
+        profiler.ProfilerActivity.CPU,
+        profiler.ProfilerActivity.CUDA,
+    ],
+    'schedule': profiler.schedule(
+        wait=5,
+        warmup=5,
+        active=20,
+        repeat=1
+    ),
+    'on_trace_ready': profiler.tensorboard_trace_handler('./logs'),
+}
+
+# Modified training loop with profiling
 if ep_code == 1:
     if __name__ == "__main__":
         main()
-
 else:
     if tp_code == 1:
         if master_process:
@@ -3245,14 +3371,26 @@ else:
         else:
             x = torch.empty(B, T, dtype=torch.long, device=device)
             y = torch.empty(B, T, dtype=torch.long, device=device)
-
         x, y = broadcast_batch(x, y, src=0)
-
     else:
-        x,y = train_loader.next_batch() # get the first batch of training data
-
+        x, y = train_loader.next_batch()
 
     loss_stats = []
+    
+    # Initialize profiler
+    if ProfilingConfig['active'] and master_process:
+        prof = profiler.profile(
+            activities=ProfilingConfig['activities'],
+            schedule=ProfilingConfig['schedule'],
+            on_trace_ready=ProfilingConfig['on_trace_ready'],
+            record_shapes=ProfilingConfig['record_shapes'],
+            profile_memory=ProfilingConfig['profile_memory'],
+            with_stack=ProfilingConfig['with_stack'],
+            with_flops=True,  # Add FLOPs counting
+            with_modules=True,  # Track module hierarchy
+        )
+        prof.start()
+    
     for iter in range(TrainingConfig.max_iters+1):
         t0 = perf_counter()
 
@@ -3265,32 +3403,20 @@ else:
         
         optimizer.zero_grad(set_to_none=True)
 
-        a,b = 0,0
-        if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        a, b = 0, 0
+        if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
             a = perf_counter()
             losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
             b = perf_counter()
             if master_process:
                 print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
             t0 = b
-        
-        
-        # Add evaluation logging
-        if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
-            losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-            
-            if master_process:
-                print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
-                
-                if use_wandb:
-                    wandb.log({
-                        "eval/train_loss": losses['train'],
-                        "eval/val_loss": losses['val'],
-                        "eval/step": iter,
-                    })
+
+        # Step profiler at the beginning of iteration
+        if ProfilingConfig['active'] and master_process:
+            prof.step()
 
         for micro_step in range(grad_accum_steps):
-
             if tp_code == 1 or cp_code == 2:
                 if master_process:
                     x, y = train_loader.next_batch()
@@ -3298,38 +3424,52 @@ else:
                     x = torch.empty(B, T, dtype=torch.long, device=device)
                     y = torch.empty(B, T, dtype=torch.long, device=device)
                 
-                # 2. Ensure all GPUs have the same data BEFORE the forward pass
                 x, y = broadcast_batch(x, y, src=0)
                 
-                # Use autocast for mixed precision
-                with torch.cuda.amp.autocast(dtype=torch_dtype): # Make sure torch_dtype is defined
-                    _, loss, _ = model(x, y)
-                    loss = loss / grad_accum_steps
+                # Profile the forward/backward pass
+                with torch.cuda.amp.autocast(dtype=torch_dtype):
+                    with profiler.record_function("forward_pass"):
+                        _, loss, _ = model(x, y)
+                        loss = loss / grad_accum_steps
 
-                # Scale the loss and call backward
-                scaler.scale(loss).backward()
+                with profiler.record_function("backward_pass"):
+                    scaler.scale(loss).backward()
 
             else:
                 model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
 
                 with ctx:
-                    _, loss, _ = model(x,y)
-                    loss:torch.Tensor = loss/grad_accum_steps
+                    # Profile forward pass
+                    with profiler.record_function("model_forward"):
+                        _, loss, _ = model(x, y)
+                        loss = loss / grad_accum_steps
 
-                x,y = train_loader.next_batch() # Async prefetch the next batch of data
+                x, y = train_loader.next_batch()
                 loss_stats.append(loss.cpu())
-                scaler.scale(loss).backward()
+                
+                # Profile backward pass
+                with profiler.record_function("loss_backward"):
+                    scaler.scale(loss).backward()
 
+        # Profile gradient clipping
         if TrainingConfig.grad_clip != 0.0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
+            with profiler.record_function("gradient_clipping"):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
 
-        scaler.step(optimizer)
-        scaler.update()    
+        # Profile optimizer step
+        with profiler.record_function("optimizer_step"):
+            scaler.step(optimizer)
+            scaler.update()
 
         if master_process:
             torch.cuda.synchronize()
-            dt  = (perf_counter()-t0)*1000
+            dt = (perf_counter() - t0) * 1000
+            
+            # Log profiling metrics periodically
+            if ProfilingConfig['active'] and iter % 100 == 0 and iter > 10:
+                print_profiling_stats(prof)
+            
             print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
 
             if use_wandb:
@@ -3341,17 +3481,53 @@ else:
                     "perf/throughput_tokens_per_sec": (B * T * grad_accum_steps * world_size) / (dt / 1000) if 'dt' in locals() else 0,
                 }
                 
+                # Add profiling metrics to wandb
+                if ProfilingConfig['active'] and iter % 50 == 0:
+                    prof_metrics = get_profiling_metrics(prof)
+                    log_data.update(prof_metrics)
+                
                 # Add memory usage
                 if torch.cuda.is_available():
                     log_data.update({
                         "memory/allocated_gb": torch.cuda.memory_allocated(device) / (1024**3),
                         "memory/reserved_gb": torch.cuda.memory_reserved(device) / (1024**3),
                         "memory/max_allocated_gb": torch.cuda.max_memory_allocated(device) / (1024**3),
+                        "memory/active_gb": torch.cuda.memory_stats(device).get("active_bytes.all.current", 0) / (1024**3),
+                        "memory/inactive_gb": torch.cuda.memory_stats(device).get("inactive_split_bytes.all.current", 0) / (1024**3),
                     })
                 
                 wandb.log(log_data)
-        
 
+    # Stop and analyze profiler
+    if ProfilingConfig['active'] and master_process:
+        prof.stop()
+        
+        # Print key profiling insights
+        print("\n" + "="*80)
+        print("PROFILING SUMMARY")
+        print("="*80)
+        
+        # CPU/GPU time breakdown
+        print(f"\nTotal CPU time: {prof.total_average().cpu_time_total:.3f}ms")
+        print(f"Total CUDA time: {prof.total_average().cuda_time_total:.3f}ms")
+        
+        # Memory usage
+        if ProfilingConfig['profile_memory']:
+            print(f"\nPeak CUDA memory: {prof.total_average().cuda_memory_usage / (1024**2):.2f} MB")
+        
+        # Key kernels
+        print("\nTop 5 CUDA kernels by time:")
+        for evt in prof.key_averages().sort_by("cuda_time_total"):
+            if evt.key in ["cudaMalloc", "cudaMemcpy", "cudaFree"]:
+                print(f"  {evt.key}: {evt.cuda_time_total:.3f}ms")
+        
+        # Save profiling results
+        prof.export_chrome_trace(f"profile_trace_{TrainingConfig.file_name}.json")
+        print(f"\nTrace saved to: profile_trace_{TrainingConfig.file_name}.json")
+        
+        # Export operator statistics
+        export_operator_stats(prof, TrainingConfig.file_name)
+    
     destroy_process_group()
     if use_wandb and master_process:
         wandb.finish()
