@@ -1,4 +1,36 @@
+%%writefile cp_code_try.py
 
+'''
+This script builds an LLM model based on the user's CLI inputs.
+
+This script is meant for a demo multi-GPU run, perhaphs on Kaggle which provides free access to 2 GPUs.
+eg: !torchrun --standalone --nproc_per_node=2 kaggle-train.py --moe --aux_free --eval --max_iters=250 --eval_interval=50
+
+Credits:
+    - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
+    - Thanks to Vizuara AI Labs for their detailed explanations of MLA : https://youtu.be/m1x8vA_Tscc
+
+Available settings to choose from : 
+1. Attention Type (with  KV caching): 
+   - Multi Head Attention (mha)
+   - Multi Query Attention (mqa)
+   - Grouped Query Attention (gqa)
+   - Multi Head Latent Attention (mla)
+   - (Work in progress) Flash Multi Head Latent Attention (fmla)
+
+2. Positional Encodings:
+   - Learnable PE
+   - Sinusoidal PE
+   - Rotary PE (RoPE)
+
+3. Feed Forward Layers:
+   - Dense Network Layer (moe=False): Fully Connected, MLP layer
+   - Sparse Network Layer (moe=True): Mixture of Exprts
+        - Load Balancing with Auxilary Loss function (aux_free = False) 
+        - Shared Expert Isolation                    (n_shared = 0) 
+        - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
+        - Aux Loss Free Load Balancing               (aux_free = True)  
+'''
 import warnings; warnings.filterwarnings('ignore')
 import math
 import inspect
@@ -11,7 +43,6 @@ from typing import Literal
 from dataclasses import dataclass 
 
 from torch.nn.parallel import DistributedDataParallel as DDP
-
 
 
 @dataclass
@@ -50,25 +81,21 @@ class LLMconfig:
     kv_latent_dim : int | None
     rope_head_dim : int | None
 
+    # MOVE act_recomp HERE (before fields with defaults)
     act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
 
-    # Context parallelism splits the sequence dimension across multiple GPUs. 
-    # Instead of each GPU processing the full sequence, each GPU processes a chunk of the sequence.
-   
-    context_parallel_size: int = 1  
-
-         
+    context_parallel_size: int = 1
     context_parallel_rank: int = 0
-
-    
     context_parallel_group: bool = None
+
 
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
         ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
 
-        
+        # H below is either the number of total query heads(nh)
+        # hs is the embedding dimension for the query/key, given by n_embd//nh
         B,T,H,_ = x.size()
         x_ = x.float().reshape(B, T, H, -1, 2)          # (B, T, H, hs)       -> (B, T, H, hs//2, 2)    -> creates the two pairs in the embd dim
         x_re, x_im = x_.unbind(-1)                      # (B, T, H, hs//2, 2) -> (B, T, H, hs//2)       -> splits those two pairs
@@ -83,9 +110,6 @@ class LLMconfig:
         x_out = torch.stack([x_re_out, x_im_out], dim=-1).flatten(3) # (B, T, H, hs//2), (B, T, H, hs//2) -> (B, T, H, hs)
 
         return x_out.type_as(x)
-
-
-
 
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
@@ -111,46 +135,14 @@ class GQA(nn.Module):
         # Add context parallel group
         self.context_parallel_group = getattr(config, 'context_parallel_group', None)
 
-    '''
-    Concept: Split sequence dimension across GPUs, but each GPU needs global context for attention.
-
-    Without Context Parallel:
-
-        Single GPU: [Q0 Q1 Q2 Q3] × [K0 K1 K2 K3] → Full attention
-
-    With Context Parallel (4 GPUs):
-
-        GPU0: [Q0] × [K0 K1 K2 K3] → Output0
-        GPU1: [Q1] × [K0 K1 K2 K3] → Output1  
-        GPU2: [Q2] × [K0 K1 K2 K3] → Output2
-        GPU3: [Q3] × [K0 K1 K2 K3] → Output3
-    '''
 
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
-
-
-        '''
-        Global Sequence: [Token0 Token1 Token2 Token3 Token4 Token5 Token6 Token7]
-            GPU0 (rank=0): [Token0 Token1]           # T_local = 2
-            GPU1 (rank=1): [Token2 Token3]           # T_local = 2  
-            GPU2 (rank=2): [Token4 Token5]           # T_local = 2
-            GPU3 (rank=3): [Token6 Token7]           # T_local = 2
-        '''
         B, T_local, C = x.size()  # CHANGE: T_local instead of T
-
         nh, nkvh, hs = self.config.n_head , self.config.n_kv_heads, self.head_size
 
         q_proj_size = C
         kv_proj_size = nkvh * hs
-
-        '''
-        Each GPU computes locally:
-            GPU0: Q0, K0, V0  (from Token0-1)
-            GPU1: Q1, K1, V1  (from Token2-3)
-            GPU2: Q2, K2, V2  (from Token4-5) 
-            GPU3: Q3, K3, V3  (from Token6-7)
-        '''
         q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
         q = q.view(B, T_local, nh, hs)
         k = k.view(B, T_local, nkvh, hs)
@@ -165,28 +157,10 @@ class GQA(nn.Module):
         k = k.transpose(1, 2)  # (B, nkvh, T_local, hs) 
         v = v.transpose(1, 2)  # (B, nkvh, T_local, hs)
 
-
-        '''
-        KEY STEP: All-Gather K and V
-            BEFORE all-gather:
-                GPU0: K0, V0
-                GPU1: K1, V1  
-                GPU2: K2, V2
-                GPU3: K3, V3
-
-            AFTER all-gather:
-                GPU0: [K0 K1 K2 K3], [V0 V1 V2 V3]
-                GPU1: [K0 K1 K2 K3], [V0 V1 V2 V3]
-                GPU2: [K0 K1 K2 K3], [V0 V1 V2 V3] 
-                GPU3: [K0 K1 K2 K3], [V0 V1 V2 V3]
-        '''
         # CONTEXT PARALLEL: Gather K and V along sequence dimension
         if self.config.context_parallel_size > 1:
             k = all_gather_sequence(k, dim=2, group=self.context_parallel_group)
             v = all_gather_sequence(v, dim=2, group=self.context_parallel_group)
-
-
-
 
         # Universal KV cache disabling for context parallelism
         use_cp = (self.config.context_parallel_size > 1)
@@ -206,51 +180,6 @@ class GQA(nn.Module):
 
         # Manual attention with rectangular causal mask
         attn = (q @ k.transpose(-2, -1)) / math.sqrt(hs)
-
-        '''
-            In language modeling, we use causal masking to ensure each token can only attend to previous tokens (and itself), 
-            not future tokens. This prevents the model from "cheating" by looking ahead.
-
-
-            Standard Causal Mask (single GPU):
-                Tokens:  T0   T1   T2   T3
-                    T0 can see: [T0]
-                    T1 can see: [T0, T1]  
-                    T2 can see: [T0, T1, T2]
-                    T3 can see: [T0, T1, T2, T3]
-
-            The Problem in Context Parallel
-            When we split the sequence across GPUs, each GPU only has local queries but global keys. 
-            We need to ensure causal relationships are preserved across GPU boundaries.
-
-            Example with 4 GPUs, 2 tokens each:
-            Global Sequence: [T0 T1 T2 T3 T4 T5 T6 T7]
-                GPU0: [T0 T1]  ← Queries Q0, Q1
-                GPU1: [T2 T3]  ← Queries Q2, Q3  
-                GPU2: [T4 T5]  ← Queries Q4, Q5
-                GPU3: [T6 T7]  ← Queries Q6, Q7
-
-                After all-gather, ALL GPUs have ALL Keys: [K0 K1 K2 K3 K4 K5 K6 K7]
-
-
-            The Masking Challenge
-
-                For GPU1 (handling tokens T2, T3):
-
-                Q2 (token T2) should only attend to: T0, T1, T2 (NOT T3-T7)
-                Q3 (token T3) should only attend to: T0, T1, T2, T3 (NOT T4-T7)
-                But GPU1 has ALL keys! So we need to mask out the invalid ones.
-        '''
-
-
-        '''
-            Mask Visualization for GPU1 (rank=1):
-            Global positions:   0   1   2   3   4   5   6   7
-            GPU1 Q positions:         2   3
-            Causal Mask:
-            Q2 can attend to: [0, 1, 2]        → Mask: [F, F, F, T, T, T, T, T]
-            Q3 can attend to: [0, 1, 2, 3]     → Mask: [F, F, F, F, T, T, T, T]
-        '''
         
         # Rectangular causal mask for local Q × global K
         T_global = k.size(-2)
@@ -258,32 +187,6 @@ class GQA(nn.Module):
         q_pos = shard_start + torch.arange(T_local, device=x.device)
         k_pos = torch.arange(T_global, device=x.device)
         causal_mask = (k_pos.unsqueeze(0) > q_pos.unsqueeze(1))  # (T_local, T_global)
-
-        '''
-            Query Positions (q_pos): [2, 3]
-            Key Positions   (k_pos): [0, 1, 2, 3, 4, 5, 6, 7]
-
-            Mask Calculation:
-            For Q2 (position 2): 
-            Keys at [0,1,2] → False (can attend)  
-            Keys at [3,4,5,6,7] → True (MASKED OUT) ✓
-
-            For Q3 (position 3):
-            Keys at [0,1,2,3] → False (can attend)
-            Keys at [4,5,6,7] → True (MASKED OUT) ✓
-        '''
-
-
-        '''
-        Visualization for GPU1:
-            GPU1 Local Q: [Q2, Q3] 
-            Global K:     [K0, K1, K2, K3, K4, K5, K6, K7]
-
-            Attention Matrix for GPU1:
-                K0  K1  K2  K3  K4  K5  K6  K7
-            Q2:  ✓   ✓   ✓   ✗   ✗   ✗   ✗   ✗   (causal mask applied)
-            Q3:  ✓   ✓   ✓   ✓   ✗   ✗   ✗   ✗
-        '''
         
         # Dtype-safe masking
         attn = attn.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), torch.finfo(attn.dtype).min)
@@ -292,47 +195,334 @@ class GQA(nn.Module):
         y = attn @ v
         
         # NO reduce_scatter - output is already local
-        '''
-        Each GPU produces its local output:
-            GPU0: Output0 (from Token0-1)
-            GPU1: Output1 (from Token2-3)  
-            GPU2: Output2 (from Token4-5)
-            GPU3: Output3 (from Token6-7)
-        '''
         y = y.transpose(1, 2).contiguous().view(B, T_local, C)
         y = self.resid_dropout(self.c_proj(y))
-
-        '''
-        Complete Data Flow Visualization
-
-            SEQUENCE DISTRIBUTION:
-                Global: [T0 T1 T2 T3 T4 T5 T6 T7]
-                GPU0:   [T0 T1] → Q0, K0, V0
-                GPU1:   [T2 T3] → Q1, K1, V1  
-                GPU2:   [T4 T5] → Q2, K2, V2
-                GPU3:   [T6 T7] → Q3, K3, V3
-
-                ALL-GATHER PHASE:
-                Each GPU exchanges K,V → All get [K0 K1 K2 K3], [V0 V1 V2 V3]
-
-                ATTENTION PHASE:
-                GPU0: Q0 × [K0 K1 K2 K3] × [V0 V1 V2 V3] → Output0
-                GPU1: Q1 × [K0 K1 K2 K3] × [V0 V1 V2 V3] → Output1  
-                GPU2: Q2 × [K0 K1 K2 K3] × [V0 V1 V2 V3] → Output2
-                GPU3: Q3 × [K0 K1 K2 K3] × [V0 V1 V2 V3] → Output3
-
-                FINAL OUTPUTS:
-                GPU0: Output0 (local to T0-T1)
-                GPU1: Output1 (local to T2-T3)
-                GPU2: Output2 (local to T4-T5) 
-                GPU3: Output3 (local to T6-T7)
-        '''
 
         return y, updated_kv_cache
 
 
 
 
+
+class NaiveMHLA(nn.Module):
+    """ A fully parallel implementation of the MHLA algorithm without the RoPE. No for loops."""
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
+        self.head_size = config.n_embd // config.n_head
+        self.config = config
+
+        self.W_dq  = nn.Linear(config.n_embd,        config.q_latent_dim,  bias=False)
+        self.W_uq  = nn.Linear(config.q_latent_dim,  config.n_embd,        bias=False)
+        self.W_dkv = nn.Linear(config.n_embd,        config.kv_latent_dim, bias=False)
+        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
+        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
+        self.W_o   = nn.Linear(config.n_embd,        config.n_embd,        bias=False)
+        
+        # self.ln  = nn.LayerNorm(config.kv_latent_dim)
+        self.dropout = nn.Dropout(config.dropout)
+
+        # Add context parallel group
+        self.context_parallel_group = getattr(config, 'context_parallel_group', None)
+
+        self.register_buffer('_k_absorbed_inference', None)
+        self.register_buffer('_v_absorbed_inference', None)
+
+    def _precompute_absorbed_matrices(self):
+        """Precomputes k_absorbed and v_absorbed for efficient inference."""
+        # Just to be safe
+        if (self._k_absorbed_inference is not None) and (self._v_absorbed_inference is not None):
+            return 
+        
+        nh , n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.head_size
+        with torch.no_grad():
+            self._k_absorbed_inference = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
+            self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)    
+
+    # def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False) -> tuple[torch.Tensor, torch.Tensor]:
+
+    #     B, T, C = x.size()
+    #     nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
+
+    #     # k_eff and v_eff based on training or inference
+    #     if self.training or VAL_RUN: # HIDDEN IN PLAIN SIGHT : THIS BUG TOOK ~16 HRS TO DEBUG
+    #         k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
+    #         v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
+    #     else:
+    #         if (self._k_absorbed_inference is None) or (self._v_absorbed_inference is None):
+    #             self._precompute_absorbed_matrices()
+    #         k_eff = self._k_absorbed_inference
+    #         v_eff = self._v_absorbed_inference
+        
+    #     new_c_kv = self.W_dkv(x) # down projection : (B,T,C) -> (B,T,n_kvl)
+
+    #     if kv_cache is None:
+    #         c_kv = new_c_kv # (B,T,n_kvl) ; initiate cache
+    #     else:
+    #         c_kv = torch.cat([kv_cache, new_c_kv], dim=1) # append cache
+        
+    #     updated_kv_cache = c_kv
+
+    #     T_full = c_kv.size(1) # Current total sequence length (including cache)
+
+    #     q:torch.Tensor = self.W_uq(self.W_dq(x)) # query projection : (B,T,C) -> (B,T,n_ql) -> (B,T,C)
+    #     q = q.view(B, T, nh, hs).transpose(1, 2) # (B,T,C) -> (B,T,nh,hs) -> (B, nh, T, hs)
+
+    #     attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / math.sqrt(hs)
+
+    #     # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+    #     # key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
+    #     # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+    #     # attn = attn.masked_fill(mask == 0, float('-inf'))
+        
+    #     mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+    #     attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        
+    #     attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
+
+    #     # final output : attn @ C_kv @ v_abs 
+    #     # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
+    #     y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
+    #     y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
+
+    #     return y, updated_kv_cache
+
+
+
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
+        B, T_local, C = x.size()  # CHANGE: T_local
+        nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
+
+        # ... existing k_eff, v_eff computation ...
+        if self.training or VAL_RUN:
+            k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
+            v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
+        else:
+            if (self._k_absorbed_inference is None) or (self._v_absorbed_inference is None):
+                self._precompute_absorbed_matrices()
+            k_eff = self._k_absorbed_inference
+            v_eff = self._v_absorbed_inference
+        
+        new_c_kv = self.W_dkv(x)  # (B, T_local, n_kvl)
+
+        # CONTEXT PARALLEL: Gather c_kv along sequence dimension
+        if self.config.context_parallel_size > 1:
+            c_kv = all_gather_sequence(new_c_kv, dim=1, group=self.context_parallel_group)
+            T_full = c_kv.size(1)
+        else:
+            if kv_cache is None:
+                c_kv = new_c_kv
+            else:
+                c_kv = torch.cat([kv_cache, new_c_kv], dim=1)
+            T_full = c_kv.size(1)
+
+        # Universal KV cache disabling
+        use_cp = (self.config.context_parallel_size > 1)
+        if use_cp:
+            updated_kv_cache = None
+        else:
+            updated_kv_cache = c_kv
+
+        q = self.W_uq(self.W_dq(x))  # (B, T_local, C)
+        q = q.view(B, T_local, nh, hs).transpose(1, 2)  # (B, nh, T_local, hs)
+
+        attn = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / math.sqrt(hs)
+
+        # Rectangular causal mask
+        T_global = c_kv.size(1)
+        shard_start = self.config.context_parallel_rank * T_local
+        q_pos = shard_start + torch.arange(T_local, device=x.device)
+        k_pos = torch.arange(T_global, device=x.device)
+        causal_mask = (k_pos.unsqueeze(0) > q_pos.unsqueeze(1))
+        attn = attn.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), torch.finfo(attn.dtype).min)
+
+        attn = self.dropout(F.softmax(attn, dim=-1))
+        y = attn @ c_kv.unsqueeze(1) @ v_eff
+        y = self.dropout(y.transpose(1,2).contiguous().view(B, T_local, C))
+
+        return y, updated_kv_cache
+
+class FullMHLA(nn.Module):
+    """
+    A fully parallel implementation of Multi-Head Latent Attention (MLA)
+    with Decoupled Rotary Position Embeddings (RoPE), as described in DeepSeek-V2.
+    """
+     
+    def __init__(self, config:LLMconfig):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
+        self.config = config
+        self.W_dq  = nn.Linear(config.n_embd, config.q_latent_dim , False)
+        self.dropout = nn.Dropout(config.dropout)
+
+        # Add context parallel group
+        self.context_parallel_group = getattr(config, 'context_parallel_group', None)
+        
+        # (NoPE)
+        self.head_size = config.n_embd // config.n_head
+        self.W_uq  = nn.Linear(config.q_latent_dim , config.n_embd, False)
+        self.W_dkv = nn.Linear(config.n_embd, config.kv_latent_dim, False)
+        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd, False)
+        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd, False)
+
+        # (RoPE)
+        self.W_qr  = nn.Linear(config.q_latent_dim, config.n_head * config.rope_head_dim,  False)
+        self.W_kr  = nn.Linear(config.n_embd, config.rope_head_dim, False)
+
+        # (Out)
+        self.W_o = nn.Linear(config.n_embd, config.n_embd ,False)
+
+        # Absroption during inference
+        self.register_buffer('_k_absorbed_inference', None, persistent=False)
+        self.register_buffer('_v_absorbed_inference', None, persistent=False)
+
+    def _precompute_absorbed_matrices(self):
+        """Precomputes k_absorbed and v_absorbed for efficient inference."""
+        # Just to be safe
+        if (self._k_absorbed_inference is not None) and (self._v_absorbed_inference is not None):
+            return 
+        
+        nh, nlkv, hs, nlq = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head, self.config.q_latent_dim
+        with torch.no_grad():
+            self._k_absorbed_inference = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
+            self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)    
+
+#     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
+#         B,T,C = x.size()
+#         nh,nlkv,nlq = self.config.n_head, self.config.kv_latent_dim, self.config.q_latent_dim
+#         hs = C//nh
+#         dhr = self.config.rope_head_dim
+        
+#         c_q:torch.Tensor = self.W_dq(x)  # (B,T,nlq)
+
+#  #------------ NoPE--------------
+
+#         # Define the absorbed matrices
+#         if self.training or VAL_RUN:  # HIDDEN IN PLAIN SIGHT : THIS BUG TOOK ~16 HRS TO DEBUG
+#             k_eff = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
+#             v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)  
+#         else:
+#             if (self._k_absorbed_inference is None) or (self._v_absorbed_inference is None):
+#                 self._precompute_absorbed_matrices()
+#             k_eff = self._k_absorbed_inference
+#             v_eff = self._v_absorbed_inference
+
+#         new_c_kv = self.W_dkv(x) # down projection : (B,T,C) -> (B,T,n_kvl)
+
+#         if kv_cache is None: # first pass
+#             c_kv = new_c_kv # (B,T,n_kvl) ; initiate cache
+#         else:
+#             c_kv = torch.cat([kv_cache['c_kv'], new_c_kv], dim=1) # append cache
+
+#         T_full = c_kv.size(1) # Current total sequence length (including cache)
+
+#         attn_c = c_q.unsqueeze(1) @ k_eff @ c_kv.transpose(-1,-2).unsqueeze(1)
+
+#  #------------ RoPE--------------
+
+#         c_kr:torch.Tensor = self.W_kr(x).unsqueeze(2)        # (B,T,1,dhr)
+#         k_r = LLMconfig.apply_rotary_emb(c_kr, freqs_cis).transpose(1,2)  # (B,1,T,dhr), to be cached
+
+#         # initate KV cache
+#         if kv_cache is not None:
+#             k_r = torch.cat([kv_cache['k_r'], k_r], dim=2)
+
+#         c_qr:torch.Tensor = self.W_qr(c_q).view(B,T,nh,dhr) # (B,T,nh,dhr) # because rope expects (B,T,H,dh)
+#         q_r = LLMconfig.apply_rotary_emb(c_qr, freqs_cis).transpose(1,2) # (B,nh,T,dhr)
+        
+#         attn_r = q_r @ k_r.transpose(-1,-2)
+
+#  #------------ Out--------------
+
+#         attn = (attn_c + attn_r)/math.sqrt(hs+dhr)
+
+#         # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+#         # key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
+#         # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+#         # attn = attn.masked_fill(mask == 0, float('-inf')) 
+
+#         mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+#         attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+
+#         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
+
+#         # final output : attn @ C_kv @ v_abs 
+#         # (B, nh, T, T) * (B, 1, T, n_kvl) * (1, nh, n_kvl, hs) = (B, nh, T, hs)
+#         y:torch.Tensor = attn @ c_kv.unsqueeze(1) @ v_eff #(B, nh, T, hs)
+#         y = self.dropout(y.transpose(1,2).contiguous().view(B,T,C))
+
+#         updated_kv_cache = {'c_kv': c_kv, 'k_r': k_r}
+
+#         return y, updated_kv_cache
+
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
+        B, T_local, C = x.size()  # CHANGE: T_local
+        nh, nlkv, nlq = self.config.n_head, self.config.kv_latent_dim, self.config.q_latent_dim
+        hs = C//nh
+        dhr = self.config.rope_head_dim
+        
+        c_q = self.W_dq(x)  # (B, T_local, nlq)
+
+        # ... existing k_eff, v_eff computation ...
+        if self.training or VAL_RUN:
+            k_eff = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
+            v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)  
+        else:
+            if (self._k_absorbed_inference is None) or (self._v_absorbed_inference is None):
+                self._precompute_absorbed_matrices()
+            k_eff = self._k_absorbed_inference
+            v_eff = self._v_absorbed_inference
+
+        new_c_kv = self.W_dkv(x)  # (B, T_local, nlkv)
+
+        # CONTEXT PARALLEL: Gather c_kv and k_r
+        if self.config.context_parallel_size > 1:
+            c_kv = all_gather_sequence(new_c_kv, dim=1, group=self.context_parallel_group)
+            T_full = c_kv.size(1)
+        else:
+            if kv_cache is None:
+                c_kv = new_c_kv
+            else:
+                c_kv = torch.cat([kv_cache['c_kv'], new_c_kv], dim=1)
+            T_full = c_kv.size(1)
+
+        # RoPE path with gathering
+        c_kr = self.W_kr(x).unsqueeze(2)  # (B, T_local, 1, dhr)
+        k_r = LLMconfig.apply_rotary_emb(c_kr, freqs_cis).transpose(1,2)  # (B, 1, T_local, dhr)
+
+        if self.config.context_parallel_size > 1:
+            k_r = all_gather_sequence(k_r, dim=2, group=self.context_parallel_group)
+        else:
+            if kv_cache is not None:
+                k_r = torch.cat([kv_cache['k_r'], k_r], dim=2)
+
+        c_qr = self.W_qr(c_q).view(B, T_local, nh, dhr)
+        q_r = LLMconfig.apply_rotary_emb(c_qr, freqs_cis).transpose(1,2)  # (B, nh, T_local, dhr)
+        
+        attn_r = q_r @ k_r.transpose(-1,-2)
+        attn_c = c_q.unsqueeze(1) @ k_eff @ c_kv.transpose(-1,-2).unsqueeze(1)
+        attn = (attn_c + attn_r) / math.sqrt(hs + dhr)
+
+        # Rectangular causal mask
+        T_global = c_kv.size(1)
+        shard_start = self.config.context_parallel_rank * T_local
+        q_pos = shard_start + torch.arange(T_local, device=x.device)
+        k_pos = torch.arange(T_global, device=x.device)
+        causal_mask = (k_pos.unsqueeze(0) > q_pos.unsqueeze(1))
+        attn = attn.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), torch.finfo(attn.dtype).min)
+
+        attn = self.dropout(F.softmax(attn, dim=-1))
+        y = attn @ c_kv.unsqueeze(1) @ v_eff
+        y = self.dropout(y.transpose(1,2).contiguous().view(B, T_local, C))
+
+        # Universal KV cache disabling
+        use_cp = (self.config.context_parallel_size > 1)
+        if use_cp:
+            updated_kv_cache = None
+        else:
+            updated_kv_cache = {'c_kv': c_kv, 'k_r': k_r}
+
+        return y, updated_kv_cache
 
 class Attention(nn.Module):
     """ Routes the attention mechanism according to the config"""
@@ -968,8 +1158,6 @@ elif ModelConfig.attn == 'mla':
         assert ModelConfig.rope_head_dim is not None, "Need dim of Rotary heads"
 
 
-
-
 # After dist.init_process_group()
 ModelConfig.context_parallel_size = world_size
 ModelConfig.context_parallel_rank = rank
@@ -1008,7 +1196,6 @@ def tokenize_and_save():
 
 tokenize_and_save() # Using The Tiny Shakespeare dataset for demo
 
-
 class DataLoader:
     def __init__(self, B, T, file_path, device, context_parallel_size=1, context_parallel_rank=0):
         self.B = B
@@ -1036,8 +1223,40 @@ class DataLoader:
 
 
 
+
+    # def next_batch(self):
+    #     """
+    #     Returns (x, y) where:
+    #     - x is (B, T) input tokens
+    #     - y is (B, T) target tokens (shifted by one)
+    #     """
+    #     B, T = self.B, self.T
+
+    #     # Sample B random starting positions independently
+    #     start_indices = torch.randint(0, self.N - T - 1, (B,))
+
+    #     # Gather sequences
+    #     x_list = []
+    #     y_list = []
+    #     for start in start_indices:
+    #         seq = self.tokens[start : start + T + 1].astype(np.int64)
+    #         x_list.append(seq[:-1])
+    #         y_list.append(seq[1:])
+
+    #     # Stack into tensors
+    #     x = torch.from_numpy(np.stack(x_list)).long()
+    #     y = torch.from_numpy(np.stack(y_list)).long()
+
+    #     # Move to device (with pinned memory if CUDA)
+    #     if self.device_type == 'cuda':
+    #         x = x.pin_memory().to(self.device, non_blocking=True)
+    #         y = y.pin_memory().to(self.device, non_blocking=True)
+    #     else:
+    #         x = x.to(self.device)
+    #         y = y.to(self.device)
+    #     return x, y
+
     def next_batch(self):
-        
         B, local_T = self.B, self.local_T
         start_indices = torch.randint(0, self.N - self.T - 1, (B,))
 
@@ -1073,7 +1292,6 @@ class DataLoader:
 
 
 
-
 def all_gather_sequence(tensor: torch.Tensor, dim: int, group=None) -> torch.Tensor:
     """Efficient all-gather along specified dimension using all_gather_into_tensor"""
     if not torch.distributed.is_initialized():
@@ -1103,6 +1321,23 @@ def all_gather_sequence(tensor: torch.Tensor, dim: int, group=None) -> torch.Ten
     
     return out
 
+
+
+
+
+def reduce_scatter_sequence(tensor, group=None):
+    """Reduce-scatter sequence chunks to context parallel ranks"""
+    world_size = torch.distributed.get_world_size(group=group)
+    
+    if world_size == 1:
+        return tensor
+    
+    # Split tensor into chunks for reduce-scatter
+    tensor_chunks = list(tensor.chunk(world_size, dim=1))
+    output = torch.zeros_like(tensor_chunks[0])
+    torch.distributed.reduce_scatter(output, tensor_chunks, group=group)
+    
+    return output
 
 
 
@@ -1186,9 +1421,19 @@ if master_process :
     if model.print_fused_adamw: print("Using Fused AdamW")
     if model.print_act_recomp: print("Using Activation Recomputation")
 
+# model = FSDP(
+#     model,
+#     auto_wrap_policy=fsdp_wrap_policy,
+#     mixed_precision=mp_policy,
+#     sharding_strategy=ShardingStrategy.FULL_SHARD, # This is ZeRO-3
+#     device_id=torch.cuda.current_device(),
+#     # cpu_offload=CPUOffload(offload_params=True), # Optional: to save even more GPU memory
+#     limit_all_gathers=True, # Recommended for performance
+#     use_orig_params=True, # Important for optimizers like AdamW and for getting original parameters
+#     sync_module_states=True,
+# )
 
-
-model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 
 if master_process : print("Using compiled model")
