@@ -83,7 +83,7 @@ print('ddp_flag : ', ddp_flag)
 print('------')
 
 
-tp_code = 1
+tp_code = 2
 print('1 for TP')
 print('2 for No TP')
 
