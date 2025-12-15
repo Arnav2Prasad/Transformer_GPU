@@ -1,44 +1,109 @@
 
-'''
-This script builds an LLM model based on the user's CLI inputs.
-Credits:
-    - This code is highly inspired by Andrej Karpathy's work on his nanoGPT : https://github.com/karpathy/nanoGPT/
-    - Thanks to Vizuara AI Labs for their detailed explanations of MLA : https://youtu.be/m1x8vA_Tscc
-
-Available settings to choose from : 
-1. Attention Type (with  KV caching): 
-   - Multi Head Attention (mha)
-   - Multi Query Attention (mqa)
-   - Grouped Query Attention (gqa)
-   - Multi Head Latent Attention (mla)
-   - (Work in progress) Flash Multi Head Latent Attention (fmla)
-
-2. Positional Encodings:
-   - Learnable PE
-   - Sinusoidal PE
-   - Rotary PE (RoPE)
-
-3. Feed Forward Layers:
-   - Dense Network Layer (moe=False): Fully Connected, MLP layer
-   - Sparse Network Layer (moe=True): Mixture of Exprts
-        - Load Balancing with Auxilary Loss function (aux_free = False) 
-        - Shared Expert Isolation                    (n_shared = 0) 
-        - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
-        - Aux Loss Free Load Balancing               (aux_free = True)  
-'''
-import os
-import argparse
-import tiktoken
-import requests
+import warnings; warnings.filterwarnings('ignore')
 import math
+import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 
 from typing import Literal
 from dataclasses import dataclass 
+
+
+
+
+# we added the below code
+def _get_group_and_ranks(tp_group = None):
+    """Get TP group, world size, and rank - safer version""" 
+    if not dist.is_initialized():
+        print('inside if not dist.is_initialized() ')
+        return None ,1, 0
+    
+    tp_group = tp_group or dist.group.WORLD
+
+    return tp_group , dist.get_world_size(tp_group) , dist.get_rank(tp_group)
+
+
+
+class ColumnParallelLinear(nn.Module):
+    """Shard the weight matrix along output dimension (column-wise)"""
+
+    def __init__(self , in_features , out_features , bias = True , gather_output=True , group = None):
+        super().__init__()
+
+        self.group  , self.world_size , self.rank  = _get_group_and_ranks(group)
+
+        assert out_features % self.world_size == 0, \
+            f"out_features={out_features} not divisible by TP world_size={self.world_size}"
+
+        self.local_out_features = out_features // self.world_size
+
+        self.linear = nn.Linear(in_features, self.local_out_features, bias=bias)
+        self.gather_output = gather_output
+
+
+        # TP-aware initialization for better training parity
+        self._apply_tp_aware_init()
+
+
+    def _apply_tp_aware_init(self):
+        """Scale initialization for TP parity"""
+
+        with torch.no_grad():
+            # Scale weights by 1/sqrt(tp_size) for variance preservation
+            if self.world_size > 1:
+
+                self.linear.weight.data.div_(self.world_size ** 0.5)
+
+                if self.linear.bias is not None:
+                    self.linear.bias.data.div_(self.world_size ** 0.5)
+
+    def forward(self , x):
+        local_output = self.linear(x)
+
+        if self.world_size > 1 and self.gather_output:
+            # Faster all-gather with pre-allocated tensor
+            full_output = torch.empty(
+                *local_output.shape[:-1],
+                local_output.shape[-1] * self.world_size,
+                dtype=local_output.dtype,
+                device=local_output.device
+            )
+            dist.all_gather_into_tensor(full_output, local_output, group=self.group)
+            return full_output
+        return local_output
+
+class RowParallelLinear(nn.Module):
+    """Shard the weight matrix along input dimension (row-wise)"""
+    def __init__(self, in_features, out_features, bias=True, input_is_parallel=False, group=None):
+        super().__init__()
+        self.group, self.world_size, self.rank = _get_group_and_ranks(group)
+        
+        assert in_features % self.world_size == 0, \
+            f"in_features={in_features} not divisible by TP world_size={self.world_size}"
+        
+        self.local_in_features = in_features // self.world_size
+        self.linear = nn.Linear(self.local_in_features, out_features, bias=bias)
+        self.input_is_parallel = input_is_parallel
+        
+    def forward(self, x):
+        if not self.input_is_parallel and self.world_size > 1:
+            # Split input along feature dimension
+            x = x.chunk(self.world_size, dim=-1)[self.rank]
+        
+        local_output = self.linear(x)
+        
+        if self.world_size > 1:
+            dist.all_reduce(local_output, op=dist.ReduceOp.SUM, group=self.group)
+            
+        return local_output
+
+
+# done implementation
+
+
 
 @dataclass
 class LLMconfig:
@@ -102,16 +167,32 @@ class LLMconfig:
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
 
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:LLMconfig, tp_group = None):
         super().__init__()
+
         if config.attn == 'mha' : config.n_kv_heads = config.n_head
         elif config.attn == 'mqa' : config.n_kv_heads = 1
         else : assert config.n_head % config.n_kv_heads == 0, "n_head must be divisible by n_kv_heads"
         
         assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
+
         self.config = config
+
+        # for TP -> added the below line
+        self.tp_group, self.tp_size, self.tp_rank = _get_group_and_ranks(tp_group)
+        # Critical divisibility assertions
+        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
+        assert config.n_head % self.tp_size == 0, "n_head must be divisible by tp_size"
+        assert config.n_embd % self.tp_size == 0, "n_embd must be divisible by tp_size"
+
+
+
         self.head_size = config.n_embd // config.n_head
 
+        # Distribute heads across TP ranks
+        self.n_head_per_rank = config.n_head // self.tp_size
+
+        '''
         # k,q,v in a btach
         self.c_attn = nn.Linear(config.n_embd, config.n_embd + 2 * config.n_kv_heads * self.head_size)
         # output projection
@@ -119,8 +200,49 @@ class GQA(nn.Module):
         # regularization
         self.attn_dropout  = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
+        '''
+
+
+        # Critical: Handle KV head partitioning correctly
+        self.partition_kv = (config.n_kv_heads % self.tp_size == 0)
+        if self.partition_kv:
+            self.n_kv_heads_per_rank = config.n_kv_heads // self.tp_size
+            # Additional safety check for KV projection divisibility
+            kv_out_features = 2 * config.n_kv_heads * self.head_size
+            assert kv_out_features % self.tp_size == 0, \
+                "KV out features must be divisible by tp_size when partitioning KV"
+        else:
+            self.n_kv_heads_per_rank = config.n_kv_heads  # Replicated on all ranks
+        
+        # Q projection: Always TP-sharded
+        self.q_proj = ColumnParallelLinear(
+            config.n_embd, config.n_embd, 
+            bias=True, gather_output=False, group=self.tp_group
+        )
+        
+        # KV projection: Sharded only if divisible, else replicated
+        kv_out_features = 2 * config.n_kv_heads * self.head_size
+        if self.partition_kv:
+            self.kv_proj = ColumnParallelLinear(
+                config.n_embd, kv_out_features,
+                bias=True, gather_output=False, group=self.tp_group
+            )
+        else:
+            self.kv_proj = nn.Linear(config.n_embd, kv_out_features, bias=True)
+        
+        # Output projection: RowParallel with all-reduce
+        self.c_proj = RowParallelLinear(
+            config.n_embd, config.n_embd,
+            bias=True, input_is_parallel=True, group=self.tp_group
+        )
+        
+        self.resid_dropout = nn.Dropout(config.dropout)
+
+
+
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
+        '''
         B, T, C = x.size()
         nh, nkvh, hs = self.config.n_head , self.config.n_kv_heads, self.head_size
 
@@ -157,33 +279,145 @@ class GQA(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
 
         return y, updated_kv_cache
+        '''
+
+        B, T, C = x.size()
+        hs = self.head_size
+        
+        # Query projection (always TP-sharded) - with contiguity guarantee
+        q_local = self.q_proj(x)  # [B, T, C/tp_size]
+        q = q_local.contiguous().view(B, T, self.n_head_per_rank, hs)
+        
+        # Key-Value projection (sharded or replicated)
+        kv = self.kv_proj(x)
+        
+        # Shape safety check for KV projection output
+        if self.partition_kv:
+            expected_kv_dim = 2 * self.n_kv_heads_per_rank * hs
+        else:
+            expected_kv_dim = 2 * self.config.n_kv_heads * hs
+        
+        assert kv.shape[-1] == expected_kv_dim, \
+            f"KV projection output dim {kv.shape[-1]} != expected {expected_kv_dim}"
+        
+        # Calculate split sizes based on actual output
+        kv_split_size = expected_kv_dim // 2
+        k, v = kv.split([kv_split_size, kv_split_size], dim=2)
+        
+        # Ensure contiguity before view operations
+        k = k.contiguous().view(B, T, self.n_kv_heads_per_rank, hs)
+        v = v.contiguous().view(B, T, self.n_kv_heads_per_rank, hs)
+        
+        # Apply rotary embeddings if needed (expects [B, T, heads, hs])
+        if self.config.pos_emb == 'rope' and freqs_cis is not None:
+            # q = self.apply_rotary_emb(q, freqs_cis)
+            # k = self.apply_rotary_emb(k, freqs_cis)
+            q = LLMconfig.apply_rotary_emb(q, freqs_cis)  # ✅ Static method call
+            k = LLMconfig.apply_rotary_emb(k, freqs_cis)  # ✅ Static method call
+        
+        # Transpose for attention: [B, heads, T, hs]
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        
+        # Handle KV cache
+        if kv_cache is not None:
+            past_k, past_v = kv_cache
+            k = torch.cat((past_k, k), dim=-2)
+            v = torch.cat((past_v, v), dim=-2)
+        updated_kv_cache = (k, v)
+        
+        # Repeat KV heads to match Q heads if needed - WITH SAFETY ASSERT
+        if self.n_kv_heads_per_rank != self.n_head_per_rank:
+            assert self.n_head_per_rank % self.n_kv_heads_per_rank == 0, \
+                "Local n_head must be a multiple of local n_kv_heads when repeating."
+            num_repeats = self.n_head_per_rank // self.n_kv_heads_per_rank
+            k = k.repeat_interleave(num_repeats, dim=1)
+            v = v.repeat_interleave(num_repeats, dim=1)
+        
+        # Scaled dot-product attention
+        y = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=None,
+            dropout_p=self.config.dropout if self.training else 0,
+            is_causal=True
+        )
+        
+        # Reshape back to [B, T, local_dim]
+        y = y.transpose(1, 2).contiguous().view(B, T, -1)
+        
+        # Output projection with all-reduce
+        y = self.resid_dropout(self.c_proj(y))
+        
+        return y, updated_kv_cache
+
+
+
 
 class NaiveMHLA(nn.Module):
     """ A fully parallel implementation of the MHLA algorithm without the RoPE. No for loops."""
+    """TP-enabled MHLA (no RoPE). Shards across heads only; latent dims replicated."""
+
     def __init__(self, config:LLMconfig):
         super().__init__()
+
         assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
+
+
         self.head_size = config.n_embd // config.n_head
         self.config = config
 
-        self.W_dq  = nn.Linear(config.n_embd,        config.q_latent_dim,  bias=False)
-        self.W_uq  = nn.Linear(config.q_latent_dim,  config.n_embd,        bias=False)
-        self.W_dkv = nn.Linear(config.n_embd,        config.kv_latent_dim, bias=False)
-        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
-        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
-        self.W_o   = nn.Linear(config.n_embd,        config.n_embd,        bias=False)
+        # TP Plumbing
+        self.tp_group, self.tp_size, self.tp_rank = _get_group_and_ranks(tp_group)
+        assert config.n_head % self.tp_size == 0, "n_head must be divisible by tp_size"
+        assert config.n_embd % self.tp_size == 0, "n_embd must be divisible by tp_size"
+        self.nh_local = config.n_head // self.tp_size
+        self.c_local = self.nh_local * self.head_size
+        self.embd_start = self.c_local * self.tp_rank
+        self.embd_end   = self.embd_start + self.c_local
+        self.gather_output = gather_output
+
+
+
+        # self.W_dq  = nn.Linear(config.n_embd,        config.q_latent_dim,  bias=False)
+        # self.W_uq  = nn.Linear(config.q_latent_dim,  config.n_embd,        bias=False)
+        # self.W_dkv = nn.Linear(config.n_embd,        config.kv_latent_dim, bias=False)
+        # self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
+        # self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd,        bias=False)
+        # self.W_o   = nn.Linear(config.n_embd,        config.n_embd,        bias=False)
+
+        # ✅ Keep replicated layers (like FullMHLA)
+        self.W_dq  = nn.Linear(config.n_embd, config.q_latent_dim, bias=False)
+        self.W_dkv = nn.Linear(config.n_embd, config.kv_latent_dim, bias=False)
+        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd, bias=False)
+        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd, bias=False)
+        self.W_o   = nn.Linear(config.n_embd, config.n_embd, bias=False)
+
+        # ✅ Only shard W_uq
+        self.W_uq = ColumnParallelLinear(
+            config.q_latent_dim, config.n_embd, bias=False,
+            gather_output=False, group=self.tp_group
+        )
         
-        # self.ln  = nn.LayerNorm(config.kv_latent_dim)
+        # ✅ Add RowParallel output
+        self.output_proj = RowParallelLinear(
+            config.n_embd, config.n_embd, bias=False,
+            input_is_parallel=True, group=self.tp_group
+        )
+        
         self.dropout = nn.Dropout(config.dropout)
 
         self.register_buffer('_k_absorbed_inference', None)
         self.register_buffer('_v_absorbed_inference', None)
+
+
 
     def _precompute_absorbed_matrices(self):
         """Precomputes k_absorbed and v_absorbed for efficient inference."""
         # Just to be safe
         if (self._k_absorbed_inference is not None) and (self._v_absorbed_inference is not None):
             return 
+
+        if (self._k_abs_local is not None) and (self._v_abs_local is not None):
+            return
         
         nh , n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.head_size
         with torch.no_grad():
@@ -238,6 +472,10 @@ class NaiveMHLA(nn.Module):
 
         return y, updated_kv_cache
 
+
+
+
+'''
 class FullMHLA(nn.Module):
     """
     A fully parallel implementation of Multi-Head Latent Attention (MLA)
@@ -348,56 +586,283 @@ class FullMHLA(nn.Module):
 
         return y, updated_kv_cache
 
+'''
+
+
+class FullMHLA(nn.Module):
+    """
+    TP-enabled Multi-Head Latent Attention with Decoupled Rotary Position Embeddings (RoPE).
+    Shards across heads only; latent dims replicated.
+    """
+     
+    def __init__(self, config: LLMconfig, tp_group=None, gather_output=True):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0, "num of heads must be a divisor of n_embd"
+        self.config = config
+        self.hs = config.n_embd // config.n_head
+        self.dhr = config.rope_head_dim
+
+        # ---- TP plumbing ----
+        self.tp_group, self.tp_size, self.tp_rank = _get_group_and_ranks(tp_group)
+        assert config.n_head % self.tp_size == 0, "n_head must be divisible by tp_size"
+        assert config.n_embd % self.tp_size == 0, "n_embd must be divisible by tp_size"
+        self.nh_local = config.n_head // self.tp_size
+
+        self.c_local = self.nh_local * self.hs
+
+        self.embd_start = self.c_local * self.tp_rank
+        self.embd_end = self.embd_start + self.c_local
+        self.gather_output = gather_output
+
+        # Keep latent/KV layers REPLICATED (as in original)
+        self.W_dq  = nn.Linear(config.n_embd, config.q_latent_dim, bias=False)      # REPLICATED
+        self.W_dkv = nn.Linear(config.n_embd, config.kv_latent_dim, bias=False)     # REPLICATED  
+        self.W_uk  = nn.Linear(config.kv_latent_dim, config.n_embd, bias=False)     # REPLICATED
+        self.W_uv  = nn.Linear(config.kv_latent_dim, config.n_embd, bias=False)     # REPLICATED
+        self.W_o   = nn.Linear(config.n_embd, config.n_embd, bias=False)            # REPLICATED
+        self.W_kr  = nn.Linear(config.n_embd, config.rope_head_dim, bias=False)     # REPLICATED
+
+        
+
+        # Only shard the "up to C" projections
+        self.W_uq = ColumnParallelLinear(
+            config.q_latent_dim, config.n_embd, bias=False,
+            gather_output=False, group=self.tp_group  # ✅ gather_output=False to keep sharded
+        )
+        self.W_qr = ColumnParallelLinear(
+            config.q_latent_dim, config.n_head * config.rope_head_dim, bias=False,
+            gather_output=False, group=self.tp_group  # ✅ gather_output=False
+        )
+        
+        # ✅ ADD RowParallel tail instead of manual all-gather
+        self.output_proj = RowParallelLinear(
+            config.n_embd, config.n_embd, bias=False,
+            input_is_parallel=True, group=self.tp_group  # ✅ input_is_parallel=True
+        )
+
+        # ---- Replicated RoPE projections ----
+        self.W_kr = nn.Linear(config.n_embd, config.rope_head_dim, bias=False)
+
+        self.dropout = nn.Dropout(config.dropout)
+
+        # rank-local absorbed matrices for inference
+        self.register_buffer('_k_abs_local', None, persistent=False)
+        self.register_buffer('_v_abs_local', None, persistent=False)
+
+
+    def _precompute_absorbed_local(self):
+        """Precomputes local absorbed matrices using the rank's head slice."""
+        if (self._k_abs_local is not None) and (self._v_abs_local is not None):
+            return
+        
+        nlq, n_kvl, C = self.config.q_latent_dim, self.config.kv_latent_dim, self.config.n_embd
+        nh, hs = self.config.n_head, self.hs
+        c0, c1 = self.embd_start, self.embd_end
+
+        with torch.no_grad():
+            # Local k_eff: (W_dq^T @ W_uq_local^T @ W_uk[local])
+            W_dq_T = self.W_dq.weight.t()                    # [C, nlq]
+            W_uq_loc_T = self.W_uq.linear.weight.t()         # [nlq, C_local]
+            A = W_dq_T @ W_uq_loc_T                          # [C, C_local]
+            
+            # Extract local head slice
+            A_loc_rows = A[c0:c1, :]                         # [C_local, C_local]
+            W_uk_rows = self.W_uk.weight[c0:c1, :]           # [C_local, n_kvl]
+            
+            # k_abs_local: [C_local, n_kvl] -> [1, nh_local, hs, n_kvl]
+            k_abs_local = (A_loc_rows @ W_uk_rows).view(self.nh_local, hs, n_kvl).unsqueeze(0)
+
+            # Local v_eff: (W_uv^T @ W_o^T[:, local])
+            v_abs_local = self.W_uv.weight.t() @ self.W_o.weight.t()[:, c0:c1]  # [n_kvl, C_local]
+            v_abs_local = v_abs_local.view(n_kvl, self.nh_local, hs).transpose(0, 1).unsqueeze(0)  # [1, nh_local, n_kvl, hs]
+
+            self._k_abs_local = k_abs_local
+            self._v_abs_local = v_abs_local
+
+    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor | None, kv_cache=None, VAL_RUN=False):
+        B, T, C = x.size()
+        # if self.tp_rank == 0:  # Only print from rank 0 to avoid clutter
+        #     print(f"FullMHLA forward: input shape {x.shape}, tp_size={self.tp_size}")
+
+        n_kvl, nlq = self.config.kv_latent_dim, self.config.q_latent_dim
+        dhr = self.dhr
+
+        # ---------- NoPE Path (Content-based attention) ----------
+        
+        # KV latent (replicated across TP ranks)
+        new_c_kv = self.W_dkv(x)  # [B, T, n_kvl]
+        
+        # Handle KV cache
+        if kv_cache is None:
+            c_kv = new_c_kv
+            k_r_cache = None
+        else:
+            c_kv = torch.cat([kv_cache['c_kv'], new_c_kv], dim=1)
+            k_r_cache = kv_cache['k_r']
+        
+        T_full = c_kv.size(1)
+        updated_kv_cache = {'c_kv': c_kv}
+
+        # Query path: replicated down, sharded up
+        c_q = self.W_dq(x)  # [B, T, nlq] - replicated
+        
+        # NoPE query projection (sharded)
+        q_local = self.W_uq(c_q)  # [B, T, C_local]
+        q_local = q_local.view(B, T, self.nh_local, self.hs).transpose(1, 2)  # [B, nh_local, T, hs]
+
+        # RoPE query projection (sharded)
+        qr_local = self.W_qr(c_q)  # [B, T, nh_local * dhr]
+        qr_local = qr_local.view(B, T, self.nh_local, dhr)  # [B, T, nh_local, dhr]
+        qr_local = qr_local.transpose(1, 2)  # [B, nh_local, T, dhr]
+
+        # ---------- RoPE Path (Position-based attention) ----------
+        
+        # RoPE key projection (replicated)
+        c_kr = self.W_kr(x).unsqueeze(2)  # [B, T, 1, dhr]
+        k_r = LLMconfig.apply_rotary_emb(c_kr, freqs_cis).transpose(1, 2)  # [B, 1, T, dhr]
+        
+        # Handle RoPE KV cache
+        if k_r_cache is not None:
+            k_r = torch.cat([k_r_cache, k_r], dim=2)  # [B, 1, T_full, dhr]
+        updated_kv_cache['k_r'] = k_r
+
+        # Apply RoPE to local query
+        if freqs_cis is not None:
+            # Reshape for RoPE application
+            qr_rope_ready = qr_local.transpose(1, 2)  # [B, T, nh_local, dhr]
+            qr_rope_ready = qr_rope_ready.contiguous().view(B, T, self.nh_local * dhr)
+            qr_rope_ready = qr_rope_ready.view(B, T, self.nh_local, dhr)  # Ensure correct shape
+            
+            qr_local = LLMconfig.apply_rotary_emb(qr_rope_ready, freqs_cis).transpose(1, 2)  # [B, nh_local, T, dhr]
+
+        # ---------- Attention Computation ----------
+        
+        # Get or compute local absorbed matrices
+        if self.training or VAL_RUN:
+            with torch.no_grad():
+                self._k_abs_local = None
+                self._v_abs_local = None
+            self._precompute_absorbed_local()
+            k_abs = self._k_abs_local
+            v_abs = self._v_abs_local
+        else:
+            if self._k_abs_local is None or self._v_abs_local is None:
+                self._precompute_absorbed_local()
+            k_abs = self._k_abs_local
+            v_abs = self._v_abs_local
+
+        # NoPE attention (content-based)
+        attn_c = (q_local @ k_abs @ c_kv.transpose(1, 2).unsqueeze(1))  # [B, nh_local, T, T_full]
+
+        # RoPE attention (position-based)
+        attn_r = qr_local @ k_r.transpose(-1, -2)  # [B, nh_local, T, T_full]
+
+        # Combined attention
+        attn = (attn_c + attn_r) / math.sqrt(self.hs + dhr)
+
+        # Causal masking
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), 
+                         diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+        attn = self.dropout(F.softmax(attn, dim=-1))
+
+        # ---------- Output Computation ----------
+        
+        # Output via latent
+        y_local = attn @ c_kv.unsqueeze(1) @ v_abs  # [B, nh_local, T, hs]
+        y_local = y_local.transpose(1, 2).contiguous().view(B, T, self.c_local)  # [B, T, C_local]
+        y_local = self.dropout(y_local)
+
+        y = self.output_proj(y_local)  # Automatically handles all-reduce
+
+        return  y, updated_kv_cache
+
+
+
 class Attention(nn.Module):
     """ Routes the attention mechanism according to the config"""
 
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:LLMconfig , tp_group=None):
         super().__init__()
         self.config = config
         if config.attn in ('mha','mqa','gqa'):
-            self.attn = GQA(config)
+            self.attn = GQA(config , tp_group=tp_group)
         
         elif config.attn == 'mla':
             if config.pos_emb != 'rope':
-                self.attn = NaiveMHLA(config)
+                self.attn = NaiveMHLA(config , tp_group=tp_group, gather_output=True)
             else:
-                self.attn = FullMHLA(config)
+                self.attn = FullMHLA(config , tp_group=tp_group, gather_output=True)
                 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
 
+
+
+
+
+
 class MLP(nn.Module):
-    """ A simple feed-forward network block. """
-    def __init__(self, config: LLMconfig):
+    """TP-aware feed-forward block. ColumnParallel -> act -> RowParallel.
+       Falls back to replicated when TP is disabled/unavailable.
+    """
+    def __init__(self, config: LLMconfig, tp_group=None, enable_tp=True):
         super().__init__()
         self.non_linearity = config.non_linearity.lower()
-        
-        if self.non_linearity == 'swiglu':
-            # One projection, then split into two halves
-            self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)
-            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+        self.tp_group, self.tp_size, self.tp_rank = _get_group_and_ranks(tp_group)
+
+        # Enable TP only if group is valid and dist is initialized
+        self.enable_tp = (
+            enable_tp and (tp_group is not None) and (self.tp_size > 1) and dist.is_initialized()
+        )
+
+        # Activation lookup
+        nl_map = {
+            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+            'glu': nn.GLU(), 'sigmoid': nn.Sigmoid(), 'lrelu': nn.LeakyReLU(0.01), 'tanh': nn.Tanh()
+        }
+        self.non_linearity_func = nl_map.get(self.non_linearity, nn.GELU())
+
+        if self.enable_tp:
+            # TP path: ColumnParallel (gather_output=False) then RowParallel (input_is_parallel=True)
+            if self.non_linearity == 'swiglu':
+                self.c_fc = ColumnParallelLinear(
+                    config.n_embd, 2 * config.up_dim, bias=False,  # ✅ 2*up_dim for SwiGLU
+                    gather_output=False, group=self.tp_group
+                )
+                self.c_proj = RowParallelLinear(
+                    config.up_dim, config.n_embd, bias=False,
+                    input_is_parallel=True, group=self.tp_group
+                )
+            else:
+                self.c_fc = ColumnParallelLinear(
+                    config.n_embd, config.up_dim, bias=False,
+                    gather_output=False, group=self.tp_group
+                )
+                self.c_proj = RowParallelLinear(
+                    config.up_dim, config.n_embd, bias=False,
+                    input_is_parallel=True, group=self.tp_group
+                )
         else:
-            non_linearity_map = {
-                'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
-                'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-                'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
-                'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()
-            }
-            self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
-            self.non_linearity_func = non_linearity_map.get(self.non_linearity, nn.GELU())
-            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+            # Replicated fallback (no TP)
+            if self.non_linearity == 'swiglu':
+                self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)  # ✅ 2*up_dim
+                self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+            else:
+                self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
+                self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
 
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         if self.non_linearity == 'swiglu':
-            x1, x2 = self.c_fc(x).chunk(2, dim=-1)
+            x1, x2 = self.c_fc(x).chunk(2, dim=-1)  # ✅ Local split on sharded tensor
             x = F.silu(x1) * x2
         else:
-            x = self.c_fc(x)
-            x = self.non_linearity_func(x)
+            x = self.non_linearity_func(self.c_fc(x))
         
-        x = self.c_proj(x)
+        x = self.c_proj(x)  # ✅ RowParallel automatically handles all-reduce when TP is on
         x = self.dropout(x)
         return x
 
@@ -405,62 +870,11 @@ class Expert(nn.Module):
     """ A single feed-forward network expert. """
     def __init__(self, config:LLMconfig):
         super().__init__()
-        self.expert = MLP(config)
+        # self.expert = MLP(config)
+        self.expert = MLP(config, tp_group=None, enable_tp=False)  # ✅ Force replicated
         
     def forward(self, x):
         return self.expert(x)
-
-
-
-
-'''
-
-ModelConfig = LLMconfig(
-    # token params
-    vocab_size = 50304, 
-    block_size = 2**10,
-    n_embd = 256, 
-    pos_emb = 'rope',
-    
-    # MoE
-    moe = True,
-
-    up_dim = 384, 
-    non_linearity = 'swiglu',  
-    dropout=0.0,
-    n_layer = 6,
-
-    n_exp = 16,
-    n_shared = 2,
-    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
-
-    coeff=0.01,
-    aux_free=True,
-    alpha = 0.0001,
-    gamma = 0.001,
-
-    # Attention
-    attn = 'mla', 
-    n_head = 8,
-    n_kv_heads=4,
-    # MHLA
-    q_latent_dim = 32, 
-    kv_latent_dim = 32,
-    rope_head_dim = 16,
-    
-    act_recomp=TrainingConfig.act_recomp)    # Link the activation recomputation from the TRaining params           
-
-
-
-'''
-
-
-
-'''
-Inheritance: Inherits from nn.Module, making it a PyTorch neural network layer
-Purpose: Implements a sophisticated MoE system based on DeepSeek's research
-Key Innovation: Uses "Auxiliary-Loss-Free" load balancing instead of traditional auxiliary losses
-'''
 
 class MoE(nn.Module):
     '''
@@ -470,189 +884,55 @@ class MoE(nn.Module):
     '''
 
     def __init__(self, config: LLMconfig):
-        '''
-        Stores the entire model configuration for access throughout the class
-        Calls parent nn.Module constructor to initialize PyTorch module properly
-        '''
         super().__init__()
         self.config = config
         
-
-        '''
-        Shared Experts: Always process ALL tokens (like regular feed-forward layers)
-        Routed Experts: Only process tokens assigned to them by the gating mechanism
-        Example: If n_exp = 16 and n_shared = 2:
-
-        Experts 0-1: Shared experts (always active)
-        Experts 2-15: Routed experts (selectively activated)
-        '''
         # first `n_shared` are shared, the rest are routed
         self.n_shared = config.n_shared
         self.n_routed = config.n_exp - config.n_shared
-
-
-
-        # config.n_act: Total number of experts to activate per token
-        # self.n_act_routed: How many routed experts to activate per token
+        
         # Number of experts to activate from the ROUTED pool
         self.n_act_routed = config.n_act - config.n_shared
-        '''
-        Example: If n_act = 8 and n_shared = 2:
-        2 shared experts always process every token
-        6 routed experts are selectively chosen per token
-        Assertion: Ensures we actually use some routed experts (otherwise MoE is pointless)
-        '''
         assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
 
-
-        '''
-        What This Creates:
-
-        A list containing config.n_exp independent Expert modules
-        Each Expert is a feed-forward network (MLP) as defined elsewhere in the code
-        ModuleList: PyTorch container that properly registers sub-modules for parameter tracking
-        Memory Impact: This is the most expensive part - each expert has its own parameters
-        '''
-
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
-
-
-        '''
-        Gating Function Details:
-        Input: Token embeddings of shape (batch_size, seq_len, n_embd)
-        Output: Router logits of shape (batch_size, seq_len, n_routed)
-        Purpose: For each token, produces scores indicating which routed experts should process it
-        No Bias: bias=False means it's a pure linear transformation without additive bias
-        Why only n_routed outputs?: Because shared experts don't need routing - they always get all tokens
-        '''
         self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
-
-
-        '''
-        Innovative Load Balancing:
-
-        Traditional Approach:
-
-        Uses auxiliary loss to encourage balanced expert usage
-        Adds complexity to training objective
-        Auxiliary-Loss-Free Approach:
-
-        Expert Bias: Learnable (but manually updated) biases for each routed expert
-        Purpose: Dynamically adjusts expert selection probabilities to balance load
-        register_buffer: Creates persistent state that's part of the module but not a learnable parameter
-        Initial State: All biases start at zero (no initial preference)
-        Update Mechanism: Biases are updated during training based on actual expert usage patterns
-        '''
         
         if config.aux_free:
             self.register_buffer('expert_bias', torch.zeros(self.n_routed))
 
 
-
-
-
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
-
-
-        '''
-        Input: x has shape (B, T, C) = (batch_size, sequence_length, embedding_dim)
-        Flattening: Reshapes to (B*T, C) to treat each token independently
-        Why flatten?: MoE routing operates per-token, not per-sequence
-        Example: If B=4, T=128, C=512 → x_flat becomes (512, 512)
-        '''
         B, T, C = x.shape
         x_flat = x.view(-1, C)  # Shape: (B*T, C)
         n_tokens = x_flat.shape[0]
 
-        # number of tokens that we need to process = n_tokens
-
         # ___________ SHARED EXPERT PATH ___________
 
-
-        '''
-        Detailed breakdown:
-        Initialize output: Creates zero tensor same shape as x_flat
-        Shared experts: Always process ALL tokens (no routing decision)
-        Sequential processing: Each shared expert processes the entire batch
-        Additive combination: Sums outputs from all shared experts
-        Bypass router: Shared experts don't use gating mechanism
-        '''
         shared_output = torch.zeros_like(x_flat)
         if self.n_shared > 0:
             for i in range(self.n_shared):
                 shared_output += self.experts[i](x_flat) # bypass the router
 
-
-        # till now:
-        # number of tokens that we need to process = n_tokens
-        #  each of the token has passed through all of the shared expert
-
         #  ___________ ROUTED EXPERT PATH ___________
 
-
-        '''
-        Gating operation:
-        Input: x_flat shape (B*T, C)
-        Gate layer: nn.Linear(C, n_routed) produces (B*T, n_routed) logits
-        Each value: Represents "affinity score" between token and expert
-        '''
-        
-        # here we router_logit matrix (Number of tokens , Number of routing experts)
         router_logits = self.gate(x_flat)
 
-
-
-        # Auxiliary-Loss-Free Branch
-
-        if self.config.aux_free:
-
-            '''
-            Add bias: expert_bias encourages underutilized experts to be selected more often
-            Top-K: Selects indices of top n_act_routed experts for each token
-            Output:
-
-            topk_biased_logits: Values of top-k logits (not used later)
-            topk_indices: Which experts were selected for each token
-            '''        
+        if self.config.aux_free:        
             # Add Bias and then select topk
             biased_router_logits = router_logits + self.expert_bias
             topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
 
-            # Til now, we get topk_indices: Which experts were selected for each token
-
-            '''
-            Gather: Gets the original (unbiased) logits for the selected experts
-            Why unbiased?: Final gating weights should reflect true token-expert affinity, not load balancing adjustments
-            Softmax: Converts logits to probability distribution over selected experts
-            '''
             # Gating weights are based on un-biased logits
             topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
             topk_gates = F.softmax(topk_original_logits, dim=1)
 
-
-            '''
-            ones: Creates tensor of 1s same shape as topk_indices
-            scatter_add_: For each expert index in topk_indices, adds 1 to the count
-            Example: If token 0 uses experts [2,5] and token 1 uses [2,7]:
-
-            Expert 2 gets +2, experts 5 and 7 get +1 each
-            fi: Fraction of tokens assigned to each expert (load distribution)
-            '''
             # Calculate expert load and update bias during training only
             with torch.no_grad():
                 ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
                 fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
                 fi = fi_counts / n_tokens
-
-
-            '''
-            Load balancing logic:
-            Ideal load: Perfectly balanced = each expert gets 1/n_routed of tokens
-            Delta: Difference between ideal and actual load
-            Bias update: Increases bias for underutilized experts (negative delta), decreases for overutilized
-            Gamma: Learning rate for bias updates
-            '''
 
             if self.training:
                 with torch.no_grad():
@@ -660,26 +940,11 @@ class MoE(nn.Module):
                     delta = ideal_load - fi 
                     self.expert_bias += (self.config.gamma*delta)
 
-
-            '''
-            Aux-loss-free "aux loss":
-            router_probs: Softmax over all experts (not just selected ones)
-            pi: Average probability of selecting each expert across all tokens
-            pi * fi: Dot product between expected and actual usage
-            Loss purpose: Encourages alignment between router preferences and actual assignments
-            '''
-
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
             aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
 
         else:
-            '''
-            Differences from aux-free:
-            No bias: Uses raw router logits for expert selection
-            Standard aux loss: Same pi * fi dot product but different coefficient
-            Simplicity: No dynamic bias updates
-            '''
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
             
@@ -692,149 +957,14 @@ class MoE(nn.Module):
 
             topk_gates = F.softmax(topk_logits, dim=1)  
 
-
-        '''
-        Expert processing loop:
-        Find tokens for expert i:
-
-        (topk_indices == i).nonzero() gets indices of tokens that selected expert i
-        Returns token_indices (which tokens) and topk_slot (which of the k slots)
-        Process tokens:
-
-        Extract tokens assigned to this expert
-        Get their corresponding gating weights
-        Pass through the expert network
-        Weight and accumulate:
-
-        Multiply expert output by gating weight
-        Use index_add_ to place results back in correct positions
-        '''
-
         # Dispatch
-        '''
-        What this creates:
-        A zero-initialized tensor with the exact same shape as x_flat
-        Shape: (B*T, C) where:
-
-        B*T = total number of tokens across batch and sequence
-        C = embedding dimension
-        Purpose: This will accumulate outputs from all routed experts
-        Why zeros?: We'll add expert outputs to their respective positions
-        '''
         routed_output = torch.zeros_like(x_flat)
 
-
-        '''
-        Iterates over each routed expert (not shared experts)
-        i ranges from 0 to n_routed-1
-        Important: i refers to the routed expert index, not the absolute expert index
-        '''
         for i in range(self.n_routed):
-            # Token-Expert Assignment Detection
-            '''
-            Understanding topk_indices
-            Shape: (B*T, n_act_routed) - for each token, stores indices of selected experts
-            Example: If topk_indices[0] = [2, 5, 7], token 0 uses routed experts 2, 5, and 7
-            The (topk_indices == i) Operation
-
-            Creates a boolean mask where True indicates token j selected expert i in slot k
-            Shape: Same as topk_indices - (B*T, n_act_routed)
-            nonzero(as_tuple=True) - The Critical Operation
-
-            Input: Boolean mask from previous step
-            Output: Two tensors:
-
-            token_indices: Which tokens selected this expert
-            topk_slot: Which of the k slots (0 to n_act_routed-1) this expert was selected in
-
-            topk_indices = tensor([[2, 5, 7],   # Token 0: experts 2,5,7
-                                [1, 2, 4],   # Token 1: experts 1,2,4  
-                                [0, 2, 6]])  # Token 2: experts 0,2,6
-
-            For i=2 (expert 2):
-            (topk_indices == 2) = tensor([[True, False, False],
-                                        [False, True, False], 
-                                        [False, True, False]])
-
-            nonzero(as_tuple=True) returns:
-            token_indices = tensor([0, 1, 2])  # Tokens 0,1,2 use expert 2
-            topk_slot    = tensor([0, 1, 1])   # In slots 0,1,1 respectively
-
-
-            # Suppose we have 3 tokens and select top 3 experts per token
-            topk_indices = torch.tensor([
-                [2, 5, 7],   # Token 0 selected experts 2, 5, 7
-                [1, 2, 4],   # Token 1 selected experts 1, 2, 4  
-                [0, 2, 6]    # Token 2 selected experts 0, 2, 6
-            ])
-
-            # For expert i=2:
-            mask = (topk_indices == 2)
-            # mask becomes:
-            # tensor([[True,  False, False],  # Token 0: expert 2 in slot 0
-            #         [False, True,  False],  # Token 1: expert 2 in slot 1  
-            #         [False, True,  False]]) # Token 2: expert 2 in slot 1
-            '''
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
-
-            '''
-            # token_indices = tensor([0, 1, 2])  # Which tokens: tokens 0, 1, 2
-            # topk_slot    = tensor([0, 1, 1])   # Which slots: slot 0, 1, 1
-            '''
-
-
-            '''
-            Purpose: Skip experts that have no tokens assigned to them
-
-            numel(): Returns number of elements in tensor
-            If zero: No tokens selected this expert, skip computation
-            Efficiency: Avoids unnecessary expert network computations
-            '''
             if token_indices.numel() > 0:
-
-                '''
-                x_flat has shape (B*T, C) - all tokens flattened
-                token_indices tells us which rows (tokens) to extract
-                Result: A tensor containing only the tokens assigned to this expert
-
-                Example:
-
-                If token_indices = [0, 1, 2] and C = 512
-                tokens_for_expert shape: (3, 512) - 3 tokens, each with 512-dimensional embeddings
-                '''
                 tokens_for_expert = x_flat[token_indices]
-
-
-
-                '''
-                Understanding topk_gates:
-                Shape: (B*T, n_act_routed) - gating weights for selected experts
-                Values: Softmax probabilities (sum to 1.0 per token)
-                Purpose: How much each expert should contribute to the final output
-                Advanced indexing:
-
-                topk_gates[token_indices, topk_slot] gets specific gate weights
-                For our example: gets weights for (token0,slot0), (token1,slot1), (token2,slot1)
-                unsqueeze(1) - Dimension adjustment:
-
-                Before: Shape (3) - scalar weights [w0, w1, w2]
-                After: Shape (3, 1) - column vector [[w0], [w1], [w2]]
-                Why?: Enables broadcasting in multiplication
-                '''
                 gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
-
-
-                '''
-                Expert indexing:
-                i + self.n_shared converts routed index to absolute index
-                Example: If n_shared = 2 and i = 2 → expert index 4
-                Expert forward pass:
-
-                Each expert is an MLP network
-                Input: tokens_for_expert shape (num_tokens, C)
-                Output: expert_output shape (num_tokens, C)
-                Key efficiency: Only computes for assigned tokens!
-                '''
 
                 # access the expert using an offset of `n_shared`
                 expert_output = self.experts[i + self.n_shared](tokens_for_expert)
@@ -849,25 +979,31 @@ class MoE(nn.Module):
 
 
 
-
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:LLMconfig , tp_group = None):
         super().__init__()
         self.is_moe = config.moe
-        self.attn = Attention(config)
+        self.act_recomp = config.act_recomp
+        self.attn = Attention(config , tp_group=tp_group)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
         if config.moe:
             self.moe = MoE(config)
         else:
-            self.mlp = MLP(config)
+            # self.mlp = MLP(config)
+            # ✅ MLP gets TP support
+            self.mlp = MLP(config, tp_group=tp_group, enable_tp=True)
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
-        # Layer Norm + Attention
-        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
+        if self.act_recomp:
+            attn_output, updated_kv_cache = checkpoint(self.attn, self.ln1(x), freqs_cis, kv_cache, VAL_RUN, use_reentrant=False)
+        else:
+            attn_output, updated_kv_cache = self.attn(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
+        
         x = x + attn_output
 
+        # NO checkpointing the MoE/MLP part -> memory grows O(T^2) for attn, O(T) for MoE, +scary looking error when we add MoE in checkpoint  
         if self.is_moe: 
             moe_output, aux_loss = self.moe(self.ln2(x))
             x = x + moe_output
@@ -879,9 +1015,12 @@ class Block(nn.Module):
 
 class LLM(nn.Module):
     """ A simple Large language model """
-    def __init__(self, config:LLMconfig):
+    def __init__(self, config:LLMconfig , tp_group=None):
         super().__init__()
         self.config = config
+        self.tp_group = tp_group  # Store TP group
+
+
         self.head_size = config.n_embd//config.n_head
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
         if config.pos_emb == 'learn':
@@ -898,7 +1037,7 @@ class LLM(nn.Module):
     
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
-            h    = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h    = nn.ModuleList([Block(config , tp_group = tp_group) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd)))
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -906,7 +1045,8 @@ class LLM(nn.Module):
         self.apply(self._init_weights)
 
         self.VAL_RUN=False
-        if config.act_recomp: print("Using Activation Recomputation")
+        self.print_act_recomp=config.act_recomp
+        self.print_fused_adamw='fused' in inspect.signature(torch.optim.AdamW).parameters
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
@@ -976,7 +1116,6 @@ class LLM(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
-            print("Using Fused AdamW")
         except:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
@@ -1018,12 +1157,7 @@ class LLM(nn.Module):
         updated_kv_caches = []
         total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
-            # The block now returns an auxiliary loss from the MoE layer
-            if not self.config.act_recomp: 
-                x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
-            else : 
-                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis, kv_caches[i], self.VAL_RUN)
-
+            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)            
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
 
@@ -1090,39 +1224,56 @@ class LLM(nn.Module):
 
         self.train()
         return idx
+ 
+### ----------- Training Script -----------
 
-
-
-
-
-
-
-# TRAINING SCRIPT
-
-import warnings ; warnings.filterwarnings("ignore")
 import os
-import math
-import torch
 import argparse
+import tiktoken
+import requests
 import numpy as np
 
-from pathlib import Path
-from typing import Literal
 from time import perf_counter
-from dataclasses import dataclass
-from contextlib import nullcontext
+
+from torch.distributed import init_process_group, destroy_process_group
+# from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+# from torch.distributed.fsdp import MixedPrecision
+# from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+# from torch.distributed.fsdp.wrap import ModuleWrapPolicy
+# from torch.distributed.fsdp.api  import ShardingStrategy, CPUOffload
+
+assert torch.cuda.is_available()
+assert torch.cuda.device_count() > 1
+
+# ______________DEVICE, DTYPE, DDP SETUP_________________
+
+init_process_group(backend='nccl')
+
+rank = int(os.environ['RANK'])
+local_rank = int(os.environ['LOCAL_RANK'])
+world_size = int(os.environ['WORLD_SIZE'])
 
 
-# ______________DEVICE and DTYPE SETUP_________________
-torch.manual_seed(1729)
-torch.cuda.manual_seed(1729)
-torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
+# device = f"cuda:{local_rank}"
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-device_type = 'cuda' if 'cuda' in device else 'cpu'
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype))
-scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' else nullcontext()
+# Correct approach
+torch.cuda.set_device(local_rank)  # Integer
+device = torch.device("cuda", local_rank)  # Proper device object
+
+master_process = rank == 0
+if master_process : print(f"Num GPUs = {world_size}")
+
+# torch.cuda.set_device(device)
+torch.manual_seed(1729 + rank)         # offset the seed
+torch.cuda.manual_seed(1729 + rank)    # offset the seed
+torch.set_float32_matmul_precision('high') # Not sure if this has any effect when used with Auto Mixed Precision
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+
+dtype = 'float16' # if not torch.cuda.is_bf16_supported() else 'bfloat16'
+torch_dtype = getattr(torch, dtype)
+ctx = torch.amp.autocast(device_type="cuda", dtype=torch_dtype)
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # ____________PARAMS-CONFIG_________________
 
@@ -1143,11 +1294,9 @@ class Trainconfig:
     file_name : str
     act_recomp : bool
 
-
-
 TrainingConfig = Trainconfig(
-    dataset='tinystories',
-    total_batch_size = 2**11,
+    dataset='shakespeare',
+    total_batch_size = 2**12,
     batch_size = 2**1, # how many independent sequences will we process in parallel?
     max_iters = 2500,
     eval = False,
@@ -1171,14 +1320,14 @@ ModelConfig = LLMconfig(
     # MoE
     moe = True,
 
-    up_dim = 384, 
+    up_dim = 512, 
     non_linearity = 'swiglu',  
     dropout=0.0,
     n_layer = 6,
 
-    n_exp = 16,
-    n_shared = 2,
-    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
+    n_exp = 8,
+    n_shared = 1,
+    n_act = 4,        ### INCLUDES THE SHARED EXPERTS
 
     coeff=0.01,
     aux_free=True,
@@ -1194,7 +1343,7 @@ ModelConfig = LLMconfig(
     kv_latent_dim = 32,
     rope_head_dim = 16,
     
-    act_recomp=TrainingConfig.act_recomp)    # Link the activation recomputation from the TRaining params           
+    act_recomp=TrainingConfig.act_recomp)
 
 # ___________ CLI-OVERRIDE__________________
 
@@ -1245,7 +1394,48 @@ def parse_args():
 
     return parser.parse_args()
 
+
+# for TP -> added this code
+# TP initialization
+import os
+
+def init_distributed():
+    """Initialize distributed training for TP"""
+    if not dist.is_initialized():
+        dist.init_process_group(backend='nccl')
+    
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    
+    # Set device correctly
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+    
+    return {
+        "rank": rank,
+        "world_size": world_size, 
+        "local_rank": local_rank,
+        "is_master": (rank == 0),
+        "device": device,
+        "tp_group": dist.group.WORLD
+    }
+# Initialize TP
+ddp_info = init_distributed()
+rank = ddp_info["rank"]
+world_size = ddp_info["world_size"] 
+local_rank = ddp_info["local_rank"]
+master_process = ddp_info["is_master"]
+device = ddp_info["device"]
+tp_group = ddp_info["tp_group"]
+
+
+
 args = parse_args()
+
+
+
+
 for key, value in vars(args).items():
     # need to eval the total_batch_size to get the grad_accum_steps
     if key == 'total_batch_size_str':
@@ -1260,6 +1450,13 @@ for key, value in vars(args).items():
             setattr(TrainingConfig, key, value)
         else:
             setattr(ModelConfig, key, value)
+
+
+# Add TP config to ModelConfig
+ModelConfig.tp_size = world_size
+ModelConfig.tp_rank = rank
+
+
 if ModelConfig.attn == 'mha':
     ModelConfig.n_kv_heads = ModelConfig.n_head
 elif ModelConfig.attn == 'mqa':
@@ -1271,6 +1468,7 @@ elif ModelConfig.attn == 'mla':
         assert ModelConfig.rope_head_dim is not None, "Need dim of Rotary heads"
 
 # _______________ DATASET _________________
+
 def tokenize_and_save():
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     try:
@@ -1295,8 +1493,13 @@ def tokenize_and_save():
         with open(file_path, 'wb') as f:
             f.write(data.tobytes())
 
-tokenize_and_save() # Using The Tiny Shakespeare dataset for demo
+# tokenize_and_save() # Using The Tiny Shakespeare dataset for demo
 
+# Only download dataset on master process
+if rank == 0:
+    tokenize_and_save()
+if dist.is_initialized():
+    dist.barrier()
 
 class DataLoader:
     def __init__(self, B, T, file_path, device):
@@ -1304,7 +1507,7 @@ class DataLoader:
         self.T = T
         self.file_path = file_path
         self.device = device
-        self.device_type = 'cuda' if 'cuda' in device else 'cpu'
+        self.device_type = 'cuda'
 
         # Keep the memory-mapped file open persistently
         self.tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
@@ -1332,8 +1535,8 @@ class DataLoader:
             y_list.append(seq[1:])
 
         # Stack into tensors
-        x = torch.tensor(np.stack(x_list), dtype=torch.long)
-        y = torch.tensor(np.stack(y_list), dtype=torch.long)
+        x = torch.from_numpy(np.stack(x_list)).long()
+        y = torch.from_numpy(np.stack(y_list)).long()
 
         # Move to device (with pinned memory if CUDA)
         if self.device_type == 'cuda':
@@ -1344,8 +1547,17 @@ class DataLoader:
             y = y.to(self.device)
         return x, y
 
-# data_dir = os.path.join('..','data', TrainingConfig.dataset)
-# print(f"Using Dataset {Path(data_dir).stem}")
+
+# Broadcast function to ensure all ranks have same data
+def broadcast_batch(x, y, src=0):
+    """Ensure all TP ranks have the same batch"""
+    if dist.is_initialized():
+        dist.broadcast(x, src=src)
+        dist.broadcast(y, src=src)
+    return x, y
+
+
+
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path="train.bin", device=device)
 val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path="val.bin", device=device)
 
@@ -1388,76 +1600,149 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
 total_batch_size = TrainingConfig.total_batch_size
 B = TrainingConfig.batch_size    # microbatch size
 T = ModelConfig.block_size       # sequence length
-assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+# assert total_batch_size % (B * T *world_size) == 0, "make sure total_batch_size is divisible by B * T * world_size"
+# grad_accum_steps = total_batch_size // (B * T *world_size)
+
+# TP-only: batch size is NOT multiplied by world_size
+assert total_batch_size % (B * T) == 0, \
+    f"total_batch_size {total_batch_size} must be divisible by B*T = {B}*{T}"
 grad_accum_steps = total_batch_size // (B * T)
 
-#___________CREATE YOUR MODEL_____________
-model = LLM(ModelConfig).to(device)
-total, active = model.get_num_params()
-print(f"total parameters = {total:,}, acitive parameters = {active:,}")
+if master_process:
+    print(f"Grad accum steps: {grad_accum_steps}")
 
-if TrainingConfig.compile :  
-    print("Using compiled model")
-    model = torch.compile(model)
+#___________CREATE YOUR MODEL_____________
+
+# fsdp_wrap_policy = ModuleWrapPolicy({Block})
+
+# mp_policy = MixedPrecision(
+#     param_dtype=torch_dtype,
+#     reduce_dtype=torch_dtype,
+#     buffer_dtype=torch_dtype,
+# )
+
+model = LLM(ModelConfig , tp_group=tp_group).to(device)
+if master_process : 
+    total, active = model.get_num_params()
+    print(f"total parameters = {total:,}, acitive parameters = {active:,}")
+    if model.print_fused_adamw: print("Using Fused AdamW")
+    if model.print_act_recomp: print("Using Activation Recomputation")
+
+# model = FSDP(
+#     model,
+#     auto_wrap_policy=fsdp_wrap_policy,
+#     mixed_precision=mp_policy,
+#     sharding_strategy=ShardingStrategy.FULL_SHARD, # This is ZeRO-3
+#     device_id=torch.cuda.current_device(),
+#     # cpu_offload=CPUOffload(offload_params=True), # Optional: to save even more GPU memory
+#     limit_all_gathers=True, # Recommended for performance
+#     use_orig_params=True, # Important for optimizers like AdamW and for getting original parameters
+#     sync_module_states=True,
+# )
+
+if master_process : print("Using compiled model")
+model = torch.compile(model)
+
+raw_model:LLM = model
 
 #______________________________________________ TRAINING ______________________________________________
 
+# optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
+
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 
-x,y = train_loader.next_batch() # get the first batch of training data
-train_loss_stats = []
-valrun_val_loss_stats = []
-valrun_train_loss_stats = []
+# Initialize scaler (add this if missing)
+scaler = torch.cuda.amp.GradScaler()
+
+# x,y = train_loader.next_batch()
+# Get first batch and broadcast to all ranks
+if master_process:
+    x, y = train_loader.next_batch()
+else:
+    x = torch.empty(B, T, dtype=torch.long, device=device)
+    y = torch.empty(B, T, dtype=torch.long, device=device)
+
+x, y = broadcast_batch(x, y, src=0)
+
+
 for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
 
-    lr = get_lr(iter, TrainingConfig) 
+    lr = get_lr(iter, TrainingConfig)
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-    a,b = 0,0
+
+    # if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0 and master_process:
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
         a = perf_counter()
         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-        valrun_val_loss_stats.append(losses['val'])
-        valrun_train_loss_stats.append(losses['train'])
         b = perf_counter()
-        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+        if master_process:
+            print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
         t0 = b
+
+    # --- SIMPLIFIED TRAINING STEP ---
+    optimizer.zero_grad(set_to_none=True)
     
     for micro_step in range(grad_accum_steps):
-        with ctx:
-            _, loss, _ = model(x,y) #logits, loss, kv cache
-            loss:torch.Tensor = loss/grad_accum_steps
+        
 
-        x,y = train_loader.next_batch() # Async prefetch the next batch of data
-        train_loss_stats.append(loss.item())
+        if master_process:
+            x, y = train_loader.next_batch()
+        else:
+            x = torch.empty(B, T, dtype=torch.long, device=device)
+            y = torch.empty(B, T, dtype=torch.long, device=device)
+        
+        # 2. Ensure all GPUs have the same data BEFORE the forward pass
+        x, y = broadcast_batch(x, y, src=0)
+        
+        # Use autocast for mixed precision
+        with torch.cuda.amp.autocast(dtype=torch_dtype): # Make sure torch_dtype is defined
+            _, loss, _ = model(x, y)
+            loss = loss / grad_accum_steps
+
+        # Scale the loss and call backward
         scaler.scale(loss).backward()
+
+
+
 
     if TrainingConfig.grad_clip != 0.0:
         scaler.unscale_(optimizer)
+        # model.clip_grad_norm_(TrainingConfig.grad_clip)
         torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
 
     scaler.step(optimizer)
     scaler.update()    
-    mem = 0
-    if "cuda" in device : 
+
+    if master_process:
+        
         torch.cuda.synchronize()
         mem = torch.cuda.memory_reserved()
-    
-    dt  = (perf_counter()-t0)*1000
-    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+        dt  = (perf_counter()-t0)*1000
+        print(f"step: {iter} | train loss:{loss.item()*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
 
-if TrainingConfig.save_model:
-    # might do in-training checkpointing later
+destroy_process_group()
+
+if TrainingConfig.save_model and master_process and False:
+    # might do in-training checkpointing later by defining a save_model() function
+    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+
+    # with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+    #     cpu_state_dict = model.state_dict()
+
+    checkpoint = {'model_config': ModelConfig, 'train_config': TrainingConfig, 'model_state': cpu_state_dict}  # Use the gathered state dict
+    torch.save(checkpoint, TrainingConfig.file_name + '_ckpt.pt')
+    print("Model checkpoint saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
+
     loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
-
-    checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
     stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
-
-    torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
     torch.save(stats, TrainingConfig.file_name+'_stats.pt')
-
-    print("Model and config saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
     print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
+
+
+# Cleanup
+if dist.is_initialized():
+    dist.destroy_process_group()

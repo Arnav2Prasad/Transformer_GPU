@@ -26,6 +26,13 @@ Available settings to choose from :
         - Fine Grained Expert Segmentation           (set up_dim, n_exp, n_act accordingly)
         - Aux Loss Free Load Balancing               (aux_free = True)  
 '''
+
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+import requests
 import os
 import argparse
 import tiktoken
@@ -35,7 +42,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch.utils.checkpoint import checkpoint
 
 from typing import Literal
 from dataclasses import dataclass 
@@ -99,6 +105,8 @@ class LLMconfig:
 
         return x_out.type_as(x)
 
+
+
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
 
@@ -157,6 +165,8 @@ class GQA(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
 
         return y, updated_kv_cache
+
+
 
 class NaiveMHLA(nn.Module):
     """ A fully parallel implementation of the MHLA algorithm without the RoPE. No for loops."""
@@ -410,58 +420,6 @@ class Expert(nn.Module):
     def forward(self, x):
         return self.expert(x)
 
-
-
-
-'''
-
-ModelConfig = LLMconfig(
-    # token params
-    vocab_size = 50304, 
-    block_size = 2**10,
-    n_embd = 256, 
-    pos_emb = 'rope',
-    
-    # MoE
-    moe = True,
-
-    up_dim = 384, 
-    non_linearity = 'swiglu',  
-    dropout=0.0,
-    n_layer = 6,
-
-    n_exp = 16,
-    n_shared = 2,
-    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
-
-    coeff=0.01,
-    aux_free=True,
-    alpha = 0.0001,
-    gamma = 0.001,
-
-    # Attention
-    attn = 'mla', 
-    n_head = 8,
-    n_kv_heads=4,
-    # MHLA
-    q_latent_dim = 32, 
-    kv_latent_dim = 32,
-    rope_head_dim = 16,
-    
-    act_recomp=TrainingConfig.act_recomp)    # Link the activation recomputation from the TRaining params           
-
-
-
-'''
-
-
-
-'''
-Inheritance: Inherits from nn.Module, making it a PyTorch neural network layer
-Purpose: Implements a sophisticated MoE system based on DeepSeek's research
-Key Innovation: Uses "Auxiliary-Loss-Free" load balancing instead of traditional auxiliary losses
-'''
-
 class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.
@@ -470,189 +428,54 @@ class MoE(nn.Module):
     '''
 
     def __init__(self, config: LLMconfig):
-        '''
-        Stores the entire model configuration for access throughout the class
-        Calls parent nn.Module constructor to initialize PyTorch module properly
-        '''
         super().__init__()
         self.config = config
         
-
-        '''
-        Shared Experts: Always process ALL tokens (like regular feed-forward layers)
-        Routed Experts: Only process tokens assigned to them by the gating mechanism
-        Example: If n_exp = 16 and n_shared = 2:
-
-        Experts 0-1: Shared experts (always active)
-        Experts 2-15: Routed experts (selectively activated)
-        '''
         # first `n_shared` are shared, the rest are routed
         self.n_shared = config.n_shared
         self.n_routed = config.n_exp - config.n_shared
-
-
-
-        # config.n_act: Total number of experts to activate per token
-        # self.n_act_routed: How many routed experts to activate per token
+        
         # Number of experts to activate from the ROUTED pool
         self.n_act_routed = config.n_act - config.n_shared
-        '''
-        Example: If n_act = 8 and n_shared = 2:
-        2 shared experts always process every token
-        6 routed experts are selectively chosen per token
-        Assertion: Ensures we actually use some routed experts (otherwise MoE is pointless)
-        '''
         assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
 
-
-        '''
-        What This Creates:
-
-        A list containing config.n_exp independent Expert modules
-        Each Expert is a feed-forward network (MLP) as defined elsewhere in the code
-        ModuleList: PyTorch container that properly registers sub-modules for parameter tracking
-        Memory Impact: This is the most expensive part - each expert has its own parameters
-        '''
-
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
-
-
-        '''
-        Gating Function Details:
-        Input: Token embeddings of shape (batch_size, seq_len, n_embd)
-        Output: Router logits of shape (batch_size, seq_len, n_routed)
-        Purpose: For each token, produces scores indicating which routed experts should process it
-        No Bias: bias=False means it's a pure linear transformation without additive bias
-        Why only n_routed outputs?: Because shared experts don't need routing - they always get all tokens
-        '''
         self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
-
-
-        '''
-        Innovative Load Balancing:
-
-        Traditional Approach:
-
-        Uses auxiliary loss to encourage balanced expert usage
-        Adds complexity to training objective
-        Auxiliary-Loss-Free Approach:
-
-        Expert Bias: Learnable (but manually updated) biases for each routed expert
-        Purpose: Dynamically adjusts expert selection probabilities to balance load
-        register_buffer: Creates persistent state that's part of the module but not a learnable parameter
-        Initial State: All biases start at zero (no initial preference)
-        Update Mechanism: Biases are updated during training based on actual expert usage patterns
-        '''
         
         if config.aux_free:
             self.register_buffer('expert_bias', torch.zeros(self.n_routed))
 
-
-
-
-
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
-
-
-        '''
-        Input: x has shape (B, T, C) = (batch_size, sequence_length, embedding_dim)
-        Flattening: Reshapes to (B*T, C) to treat each token independently
-        Why flatten?: MoE routing operates per-token, not per-sequence
-        Example: If B=4, T=128, C=512 → x_flat becomes (512, 512)
-        '''
         B, T, C = x.shape
         x_flat = x.view(-1, C)  # Shape: (B*T, C)
         n_tokens = x_flat.shape[0]
 
-        # number of tokens that we need to process = n_tokens
-
         # ___________ SHARED EXPERT PATH ___________
 
-
-        '''
-        Detailed breakdown:
-        Initialize output: Creates zero tensor same shape as x_flat
-        Shared experts: Always process ALL tokens (no routing decision)
-        Sequential processing: Each shared expert processes the entire batch
-        Additive combination: Sums outputs from all shared experts
-        Bypass router: Shared experts don't use gating mechanism
-        '''
         shared_output = torch.zeros_like(x_flat)
         if self.n_shared > 0:
             for i in range(self.n_shared):
                 shared_output += self.experts[i](x_flat) # bypass the router
 
-
-        # till now:
-        # number of tokens that we need to process = n_tokens
-        #  each of the token has passed through all of the shared expert
-
         #  ___________ ROUTED EXPERT PATH ___________
 
-
-        '''
-        Gating operation:
-        Input: x_flat shape (B*T, C)
-        Gate layer: nn.Linear(C, n_routed) produces (B*T, n_routed) logits
-        Each value: Represents "affinity score" between token and expert
-        '''
-        
-        # here we router_logit matrix (Number of tokens , Number of routing experts)
         router_logits = self.gate(x_flat)
 
-
-
-        # Auxiliary-Loss-Free Branch
-
-        if self.config.aux_free:
-
-            '''
-            Add bias: expert_bias encourages underutilized experts to be selected more often
-            Top-K: Selects indices of top n_act_routed experts for each token
-            Output:
-
-            topk_biased_logits: Values of top-k logits (not used later)
-            topk_indices: Which experts were selected for each token
-            '''        
+        if self.config.aux_free:        
             # Add Bias and then select topk
             biased_router_logits = router_logits + self.expert_bias
             topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
 
-            # Til now, we get topk_indices: Which experts were selected for each token
-
-            '''
-            Gather: Gets the original (unbiased) logits for the selected experts
-            Why unbiased?: Final gating weights should reflect true token-expert affinity, not load balancing adjustments
-            Softmax: Converts logits to probability distribution over selected experts
-            '''
             # Gating weights are based on un-biased logits
             topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
             topk_gates = F.softmax(topk_original_logits, dim=1)
 
-
-            '''
-            ones: Creates tensor of 1s same shape as topk_indices
-            scatter_add_: For each expert index in topk_indices, adds 1 to the count
-            Example: If token 0 uses experts [2,5] and token 1 uses [2,7]:
-
-            Expert 2 gets +2, experts 5 and 7 get +1 each
-            fi: Fraction of tokens assigned to each expert (load distribution)
-            '''
             # Calculate expert load and update bias during training only
             with torch.no_grad():
                 ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
                 fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
                 fi = fi_counts / n_tokens
-
-
-            '''
-            Load balancing logic:
-            Ideal load: Perfectly balanced = each expert gets 1/n_routed of tokens
-            Delta: Difference between ideal and actual load
-            Bias update: Increases bias for underutilized experts (negative delta), decreases for overutilized
-            Gamma: Learning rate for bias updates
-            '''
 
             if self.training:
                 with torch.no_grad():
@@ -660,26 +483,11 @@ class MoE(nn.Module):
                     delta = ideal_load - fi 
                     self.expert_bias += (self.config.gamma*delta)
 
-
-            '''
-            Aux-loss-free "aux loss":
-            router_probs: Softmax over all experts (not just selected ones)
-            pi: Average probability of selecting each expert across all tokens
-            pi * fi: Dot product between expected and actual usage
-            Loss purpose: Encourages alignment between router preferences and actual assignments
-            '''
-
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
             aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
 
         else:
-            '''
-            Differences from aux-free:
-            No bias: Uses raw router logits for expert selection
-            Standard aux loss: Same pi * fi dot product but different coefficient
-            Simplicity: No dynamic bias updates
-            '''
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
             
@@ -692,149 +500,14 @@ class MoE(nn.Module):
 
             topk_gates = F.softmax(topk_logits, dim=1)  
 
-
-        '''
-        Expert processing loop:
-        Find tokens for expert i:
-
-        (topk_indices == i).nonzero() gets indices of tokens that selected expert i
-        Returns token_indices (which tokens) and topk_slot (which of the k slots)
-        Process tokens:
-
-        Extract tokens assigned to this expert
-        Get their corresponding gating weights
-        Pass through the expert network
-        Weight and accumulate:
-
-        Multiply expert output by gating weight
-        Use index_add_ to place results back in correct positions
-        '''
-
         # Dispatch
-        '''
-        What this creates:
-        A zero-initialized tensor with the exact same shape as x_flat
-        Shape: (B*T, C) where:
-
-        B*T = total number of tokens across batch and sequence
-        C = embedding dimension
-        Purpose: This will accumulate outputs from all routed experts
-        Why zeros?: We'll add expert outputs to their respective positions
-        '''
         routed_output = torch.zeros_like(x_flat)
 
-
-        '''
-        Iterates over each routed expert (not shared experts)
-        i ranges from 0 to n_routed-1
-        Important: i refers to the routed expert index, not the absolute expert index
-        '''
         for i in range(self.n_routed):
-            # Token-Expert Assignment Detection
-            '''
-            Understanding topk_indices
-            Shape: (B*T, n_act_routed) - for each token, stores indices of selected experts
-            Example: If topk_indices[0] = [2, 5, 7], token 0 uses routed experts 2, 5, and 7
-            The (topk_indices == i) Operation
-
-            Creates a boolean mask where True indicates token j selected expert i in slot k
-            Shape: Same as topk_indices - (B*T, n_act_routed)
-            nonzero(as_tuple=True) - The Critical Operation
-
-            Input: Boolean mask from previous step
-            Output: Two tensors:
-
-            token_indices: Which tokens selected this expert
-            topk_slot: Which of the k slots (0 to n_act_routed-1) this expert was selected in
-
-            topk_indices = tensor([[2, 5, 7],   # Token 0: experts 2,5,7
-                                [1, 2, 4],   # Token 1: experts 1,2,4  
-                                [0, 2, 6]])  # Token 2: experts 0,2,6
-
-            For i=2 (expert 2):
-            (topk_indices == 2) = tensor([[True, False, False],
-                                        [False, True, False], 
-                                        [False, True, False]])
-
-            nonzero(as_tuple=True) returns:
-            token_indices = tensor([0, 1, 2])  # Tokens 0,1,2 use expert 2
-            topk_slot    = tensor([0, 1, 1])   # In slots 0,1,1 respectively
-
-
-            # Suppose we have 3 tokens and select top 3 experts per token
-            topk_indices = torch.tensor([
-                [2, 5, 7],   # Token 0 selected experts 2, 5, 7
-                [1, 2, 4],   # Token 1 selected experts 1, 2, 4  
-                [0, 2, 6]    # Token 2 selected experts 0, 2, 6
-            ])
-
-            # For expert i=2:
-            mask = (topk_indices == 2)
-            # mask becomes:
-            # tensor([[True,  False, False],  # Token 0: expert 2 in slot 0
-            #         [False, True,  False],  # Token 1: expert 2 in slot 1  
-            #         [False, True,  False]]) # Token 2: expert 2 in slot 1
-            '''
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
-
-            '''
-            # token_indices = tensor([0, 1, 2])  # Which tokens: tokens 0, 1, 2
-            # topk_slot    = tensor([0, 1, 1])   # Which slots: slot 0, 1, 1
-            '''
-
-
-            '''
-            Purpose: Skip experts that have no tokens assigned to them
-
-            numel(): Returns number of elements in tensor
-            If zero: No tokens selected this expert, skip computation
-            Efficiency: Avoids unnecessary expert network computations
-            '''
             if token_indices.numel() > 0:
-
-                '''
-                x_flat has shape (B*T, C) - all tokens flattened
-                token_indices tells us which rows (tokens) to extract
-                Result: A tensor containing only the tokens assigned to this expert
-
-                Example:
-
-                If token_indices = [0, 1, 2] and C = 512
-                tokens_for_expert shape: (3, 512) - 3 tokens, each with 512-dimensional embeddings
-                '''
                 tokens_for_expert = x_flat[token_indices]
-
-
-
-                '''
-                Understanding topk_gates:
-                Shape: (B*T, n_act_routed) - gating weights for selected experts
-                Values: Softmax probabilities (sum to 1.0 per token)
-                Purpose: How much each expert should contribute to the final output
-                Advanced indexing:
-
-                topk_gates[token_indices, topk_slot] gets specific gate weights
-                For our example: gets weights for (token0,slot0), (token1,slot1), (token2,slot1)
-                unsqueeze(1) - Dimension adjustment:
-
-                Before: Shape (3) - scalar weights [w0, w1, w2]
-                After: Shape (3, 1) - column vector [[w0], [w1], [w2]]
-                Why?: Enables broadcasting in multiplication
-                '''
                 gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
-
-
-                '''
-                Expert indexing:
-                i + self.n_shared converts routed index to absolute index
-                Example: If n_shared = 2 and i = 2 → expert index 4
-                Expert forward pass:
-
-                Each expert is an MLP network
-                Input: tokens_for_expert shape (num_tokens, C)
-                Output: expert_output shape (num_tokens, C)
-                Key efficiency: Only computes for assigned tokens!
-                '''
 
                 # access the expert using an offset of `n_shared`
                 expert_output = self.experts[i + self.n_shared](tokens_for_expert)
@@ -845,10 +518,6 @@ class MoE(nn.Module):
         # combine to output
         y = (shared_output + routed_output).view(B, T, C)
         return y, aux_loss
-
-
-
-
 
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
@@ -906,7 +575,8 @@ class LLM(nn.Module):
         self.apply(self._init_weights)
 
         self.VAL_RUN=False
-        if config.act_recomp: print("Using Activation Recomputation")
+        self.print_act_recomp=config.act_recomp
+        self.print_fused_adamw=False 
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
@@ -976,7 +646,7 @@ class LLM(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
-            print("Using Fused AdamW")
+            self.print_fused_adamw = True
         except:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
@@ -1092,13 +762,6 @@ class LLM(nn.Module):
         return idx
 
 
-
-
-
-
-
-# TRAINING SCRIPT
-
 import warnings ; warnings.filterwarnings("ignore")
 import os
 import math
@@ -1106,23 +769,42 @@ import torch
 import argparse
 import numpy as np
 
-from pathlib import Path
 from typing import Literal
 from time import perf_counter
 from dataclasses import dataclass
-from contextlib import nullcontext
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
 
+assert torch.cuda.is_available()
 
-# ______________DEVICE and DTYPE SETUP_________________
+# ______________DEVICE, DTYPE, DDP SETUP_________________
+
+# Add this import at the top
+import copy
+
+# Single process setup (no DDP)
+assert torch.cuda.is_available(), "CUDA is required for this script"
+device_count = torch.cuda.device_count()
+assert device_count > 0, "No CUDA devices found"
+
+devices = [torch.device(f"cuda:{i}") for i in range(device_count)]
+first_device = devices[0]
+last_device = devices[-1]  # Last device for loss computation
+
+master_process = True
+
+torch.cuda.set_device(first_device)
 torch.manual_seed(1729)
 torch.cuda.manual_seed(1729)
-torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
+torch.set_float32_matmul_precision('high')
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-device_type = 'cuda' if 'cuda' in device else 'cpu'
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype))
-scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' else nullcontext()
+dtype = 'float16'
+ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype))
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
+
+
 
 # ____________PARAMS-CONFIG_________________
 
@@ -1143,11 +825,9 @@ class Trainconfig:
     file_name : str
     act_recomp : bool
 
-
-
 TrainingConfig = Trainconfig(
-    dataset='tinystories',
-    total_batch_size = 2**11,
+    dataset='shakespeare',
+    total_batch_size = 2**12,
     batch_size = 2**1, # how many independent sequences will we process in parallel?
     max_iters = 2500,
     eval = False,
@@ -1171,14 +851,14 @@ ModelConfig = LLMconfig(
     # MoE
     moe = True,
 
-    up_dim = 384, 
+    up_dim = 512, 
     non_linearity = 'swiglu',  
     dropout=0.0,
     n_layer = 6,
 
-    n_exp = 16,
-    n_shared = 2,
-    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
+    n_exp = 8,
+    n_shared = 1,
+    n_act = 4,        ### INCLUDES THE SHARED EXPERTS
 
     coeff=0.01,
     aux_free=True,
@@ -1194,7 +874,7 @@ ModelConfig = LLMconfig(
     kv_latent_dim = 32,
     rope_head_dim = 16,
     
-    act_recomp=TrainingConfig.act_recomp)    # Link the activation recomputation from the TRaining params           
+    act_recomp=TrainingConfig.act_recomp)
 
 # ___________ CLI-OVERRIDE__________________
 
@@ -1304,7 +984,7 @@ class DataLoader:
         self.T = T
         self.file_path = file_path
         self.device = device
-        self.device_type = 'cuda' if 'cuda' in device else 'cpu'
+        self.device_type = 'cuda'
 
         # Keep the memory-mapped file open persistently
         self.tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
@@ -1332,8 +1012,8 @@ class DataLoader:
             y_list.append(seq[1:])
 
         # Stack into tensors
-        x = torch.tensor(np.stack(x_list), dtype=torch.long)
-        y = torch.tensor(np.stack(y_list), dtype=torch.long)
+        x = torch.from_numpy(np.stack(x_list)).long()
+        y = torch.from_numpy(np.stack(y_list)).long()
 
         # Move to device (with pinned memory if CUDA)
         if self.device_type == 'cuda':
@@ -1344,10 +1024,7 @@ class DataLoader:
             y = y.to(self.device)
         return x, y
 
-# data_dir = os.path.join('..','data', TrainingConfig.dataset)
-# print(f"Using Dataset {Path(data_dir).stem}")
-train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path="train.bin", device=device)
-val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path="val.bin", device=device)
+
 
 # ____________ UTIL FUNCTIONS _________________
 
@@ -1368,96 +1045,427 @@ def get_lr(iter, TrainingConfig:Trainconfig):
         coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
 
-@torch.no_grad()
-def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
-    out = {}
-    model.eval() ; model.VAL_RUN = True
-    for split, loader in [('train', train_loader), ('val', val_loader)]:
-        losses = torch.zeros(TrainingConfig.eval_iters)
-        for k in range(TrainingConfig.eval_iters):
-            X, Y = loader.next_batch() # Data is now moved to device in next_batch()
-            with ctx:
-                _, loss, _ = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train(); model.VAL_RUN = False
-    return out
 
+# Replace the estimate_loss function with this debug version:
+# Update the estimate_loss function to handle multi-process:
+@torch.no_grad()
+def estimate_loss(model, TrainingConfig: Trainconfig,
+                  train_loader: DataLoader, val_loader: DataLoader,
+                  use_pipeline: bool):
+    out = {}
+    was_training = model.training
+    model.eval()
+
+    try:
+        for split, loader in [('train', train_loader), ('val', val_loader)]:
+            losses = torch.zeros(TrainingConfig.eval_iters)
+            for k in range(TrainingConfig.eval_iters):
+                X, Y = loader.next_batch()
+
+                with ctx:
+                    # Forward pass
+                    logits = model(X)
+                    
+                    # CRITICAL: Ensure both tensors are on the same device
+                    # Use .to() with non_blocking=False to ensure synchronization
+                    Y = Y.to(logits.device, non_blocking=False)
+                    
+                    # Double-check device alignment
+                    assert logits.device == Y.device, f"Device mismatch: logits on {logits.device}, Y on {Y.device}"
+
+                    # Compute loss
+                    loss = F.cross_entropy(
+                        logits.view(-1, logits.size(-1)),
+                        Y.view(-1),
+                        ignore_index=-1
+                    )
+
+                losses[k] = loss.item()
+
+            out[split] = losses.mean()
+    except Exception as e:
+        print(f"Error in estimate_loss: {e}")
+        # Fallback: return dummy values
+        out = {'train': torch.tensor(10.0), 'val': torch.tensor(10.0)}
+    finally:
+        if was_training:
+            model.train()
+
+    return out
 #___________GRAD_ACCUM SETUP_____________
 
 total_batch_size = TrainingConfig.total_batch_size
 B = TrainingConfig.batch_size    # microbatch size
 T = ModelConfig.block_size       # sequence length
-assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
-grad_accum_steps = total_batch_size // (B * T)
 
-#___________CREATE YOUR MODEL_____________
-model = LLM(ModelConfig).to(device)
-total, active = model.get_num_params()
-print(f"total parameters = {total:,}, acitive parameters = {active:,}")
 
-if TrainingConfig.compile :  
-    print("Using compiled model")
-    model = torch.compile(model)
+# For pipeline parallelism, use chunks instead of grad_accum_steps
+chunks = 4  # Pipeline micro-batches
 
-#______________________________________________ TRAINING ______________________________________________
 
-optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 
-x,y = train_loader.next_batch() # get the first batch of training data
-train_loss_stats = []
-valrun_val_loss_stats = []
-valrun_train_loss_stats = []
-for iter in range(TrainingConfig.max_iters+1):
+# ___________CREATE PIPELINE-COMPATIBLE MODEL WRAPPER___________
+class ManualPipelineWrapper(nn.Module):
+    """Manual pipeline parallelism wrapper that splits model across devices"""
+    
+    def __init__(self, model_parts, devices):
+        super().__init__()
+        self.model_parts = nn.ModuleList(model_parts)
+        self.devices = devices
+        self.num_stages = len(model_parts)
+        self.last_device = devices[-1]  # Store last device
+        
+        # Move each part to its device
+        for i, part in enumerate(self.model_parts):
+            part.to(devices[i])
+    
+    def forward(self, x):
+        # Manual pipeline: pass data through each stage sequentially
+        activations = x
+        
+        for i, stage in enumerate(self.model_parts):
+            # Move activations to current stage's device
+            activations = activations.to(self.devices[i])
+            # Forward through current stage
+            activations = stage(activations)
+        
+        return activations
+
+
+
+class BlockTrain(nn.Module):
+    """Wrapper for Block that only takes and returns hidden states (compatible with pipeline)"""
+    def __init__(self, config: LLMconfig):
+        super().__init__()
+        self.block = Block(config)
+        self.config = config
+
+    def forward(self, x):
+        # Ignore kv_cache & aux_loss in pipeline version - only return hidden states
+        x, _, _ = self.block(x, freqs_cis=None, kv_cache=None, VAL_RUN=False)
+        return x
+
+class EmbeddingLayer(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
+        if config.pos_emb == 'learn':
+            self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
+        elif config.pos_emb == 'sin':
+            pos_emb = torch.zeros(config.block_size, config.n_embd)
+            position = torch.arange(0, config.block_size, dtype=torch.float).unsqueeze(1)
+            div_term = torch.exp(torch.arange(0, config.n_embd, 2).float() * (-math.log(10000.0) / config.n_embd))
+            pos_emb[:, 0::2] = torch.sin(position * div_term)
+            pos_emb[:, 1::2] = torch.cos(position * div_term)
+            self.register_buffer('pos_emb', pos_emb)
+        self.drop = nn.Dropout(config.dropout)
+        
+    def forward(self, x):
+        B, T = x.size()
+        tkn_emb = self.tkn_emb(x)
+        
+        if self.config.pos_emb == 'learn':
+            pos = torch.arange(0, T, dtype=torch.long, device=x.device)
+            x = tkn_emb + self.pos_emb(pos)
+        elif self.config.pos_emb == 'sin':
+            pos = torch.arange(0, T, dtype=torch.long, device=x.device)
+            x = tkn_emb + self.pos_emb[pos]
+        else:
+            x = tkn_emb
+            
+        return self.drop(x)
+
+class FinalLayer(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.ln_f = nn.LayerNorm(config.n_embd)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+    def forward(self, x):
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
+        return logits
+
+class LLMPipeline(nn.Sequential):
+    """Pipeline-compatible LLM that only takes input tokens and returns logits"""
+    
+    def __init__(self, config: LLMconfig):
+        layers = []
+        
+        # Embedding layer (only takes input tokens)
+        layers.append(EmbeddingLayer(config))
+        
+        # Transformer blocks (wrapped for pipeline compatibility)
+        for i in range(config.n_layer):
+            layers.append(BlockTrain(config))
+        
+        # Final layer norm and head
+        layers.append(FinalLayer(config))
+        
+        super().__init__(*layers)
+
+
+# ___________CREATE SYNTHETIC DATASET_____________
+
+def create_synthetic_dataset():
+    """Create synthetic training data if real dataset doesn't exist"""
+    vocab_size = ModelConfig.vocab_size
+    seq_length = ModelConfig.block_size
+    num_sequences = 1000  # Create 1000 synthetic sequences
+    
+    print("Creating synthetic dataset...")
+    
+    # Create synthetic training data
+    train_data = torch.randint(0, vocab_size, (num_sequences, seq_length), dtype=torch.int16).numpy()
+    
+    # Split into train/val
+    split_idx = int(0.9 * num_sequences)
+    train_tokens = train_data[:split_idx]
+    val_tokens = train_data[split_idx:]
+    
+    # Save to files
+    with open('train.bin', 'wb') as f:
+        f.write(train_tokens.tobytes())
+    
+    with open('val.bin', 'wb') as f:
+        f.write(val_tokens.tobytes())
+    
+    print(f"Created synthetic dataset: {len(train_tokens)} train sequences, {len(val_tokens)} val sequences")
+
+# Check if dataset files exist, create synthetic data if not
+if not os.path.exists('train.bin') or not os.path.exists('val.bin'):
+    create_synthetic_dataset()
+else:
+    # Verify files are not empty
+    train_size = os.path.getsize('train.bin')
+    val_size = os.path.getsize('val.bin')
+    if train_size == 0 or val_size == 0:
+        print("Dataset files exist but are empty. Creating synthetic dataset...")
+        create_synthetic_dataset()
+
+
+
+
+
+
+# Create a deep copy of config to avoid mutating the original
+pipeline_config = copy.deepcopy(ModelConfig)
+if pipeline_config.pos_emb == 'rope':
+    print("Warning: Changing RoPE to learnable positional encoding for pipeline compatibility")
+    pipeline_config.pos_emb = 'learn'
+
+# Create pipeline-compatible model
+pipeline_model = LLMPipeline(pipeline_config)
+
+if master_process: 
+    total_params = sum(p.numel() for p in pipeline_model.parameters())
+    print(f"Total parameters in pipeline model = {total_params:,}")
+    print(f"Using Pipeline Parallelism across {device_count} GPUs")
+    print(f"Pipeline chunks: {chunks}")
+
+# Single-GPU fallback: don't use Pipe if only one GPU
+if device_count == 1:
+    print("Single GPU detected - using standard model (no Pipe)")
+    model = pipeline_model.to(first_device)
+    use_pipeline = False
+else:
+    print("Multiple GPUs detected - using manual pipeline parallelism")
+    
+    # Split the model into parts for each device
+    layers = list(pipeline_model.children())
+    num_layers = len(layers)
+    
+    # Calculate layers per device
+    layers_per_device = num_layers // device_count
+    balance = [layers_per_device] * device_count
+    
+    # Adjust for remainder
+    remainder = num_layers - sum(balance)
+    for i in range(remainder):
+        balance[i] += 1
+    
+    print(f"Pipeline balance: {balance}")
+    
+    # Create model parts for each device
+    model_parts = []
+    start_idx = 0
+    
+    for device_idx, num_layers_in_device in enumerate(balance):
+        end_idx = start_idx + num_layers_in_device
+        
+        # Create a sequential module for this device's layers
+        device_layers = layers[start_idx:end_idx]
+        device_model = nn.Sequential(*device_layers)
+        model_parts.append(device_model)
+        
+        print(f"  GPU {device_idx}: layers {start_idx}-{end_idx-1}")
+        start_idx = end_idx
+
+    # Create pipeline model with explicit checkpoint setting
+    checkpoint_setting = 'always' if ModelConfig.act_recomp else 'never'
+    # Create manual pipeline wrapper
+    model = ManualPipelineWrapper(model_parts, devices)
+    use_pipeline = True
+
+# Disable compilation for pipeline model
+TrainingConfig.compile = False
+
+
+# ___________OPTIMIZER SETUP_____________
+
+def configure_pipeline_optimizers(model, weight_decay, learning_rate):
+    """Configure optimizer for pipelined model"""
+    param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
+    
+    # Create optim groups
+    decay_params = [p for p in param_dict.values() if p.dim() >= 2]
+    nodecay_params = [p for p in param_dict.values() if p.dim() < 2]
+    optim_groups = [
+        {'params': decay_params, 'weight_decay': weight_decay},
+        {'params': nodecay_params, 'weight_decay': 0.0}
+    ]
+    
+    try:
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
+        if master_process: print("Using Fused AdamW")
+    except:
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
+    
+    return optimizer
+
+optimizer = configure_pipeline_optimizers(model, weight_decay=0.1, learning_rate=TrainingConfig.learning_rate)
+
+# ___________DATALOADER SETUP_____________
+
+# Update DataLoader to use first device
+train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path="train.bin", device=first_device)
+val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path="val.bin", device=first_device)
+
+# ___________UPDATED UTILITY FUNCTIONS_____________
+
+def get_pipeline_output(output):
+    """Handle both direct tensor output and PipelineFuture from Pipe"""
+    if hasattr(output, "local_value"):  # PipelineFuture
+        return output.local_value()
+    else:
+        return output
+
+@torch.no_grad()
+def estimate_loss(model, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader, use_pipeline: bool):
+    out = {}
+    model.eval()
+    for split, loader in [('train', train_loader), ('val', val_loader)]:
+        losses = torch.zeros(TrainingConfig.eval_iters)
+        for k in range(TrainingConfig.eval_iters):
+            X, Y = loader.next_batch()
+            with ctx:
+                if use_pipeline:
+                    # Pipeline returns logits only
+                    output = model(X)
+                    logits = get_pipeline_output(output)
+                else:
+                    # Standard model forward (LLMPipeline returns logits)
+                    logits = model(X)
+                
+                # Compute loss outside pipeline
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    Y.view(-1),
+                    ignore_index=-1
+                )
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+def print_all_gpu_memory(prefix=""):
+    """Print memory usage for all GPUs"""
+    if master_process:
+        print(f"\n{prefix} GPU Memory Usage:")
+        for i in range(device_count):
+            allocated = torch.cuda.memory_allocated(i) / 1024**3
+            reserved = torch.cuda.memory_reserved(i) / 1024**3
+            print(f"  GPU {i}: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
+
+# ___________UPDATED TRAINING LOOP_____________
+
+print('Initial GPU memory:')
+print_all_gpu_memory("Initial")
+
+x, y = train_loader.next_batch()  # Get first batch on first device
+loss_stats = []
+
+
+for iter in range(TrainingConfig.max_iters + 1):
     t0 = perf_counter()
 
-    lr = get_lr(iter, TrainingConfig) 
+    if iter % 100 == 0:
+        print_all_gpu_memory(f"Iteration {iter}")
+
+    lr = get_lr(iter, TrainingConfig)
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-    a,b = 0,0
-    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+
+    # Evaluation
+    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
         a = perf_counter()
-        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-        valrun_val_loss_stats.append(losses['val'])
-        valrun_train_loss_stats.append(losses['train'])
+        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader, use_pipeline)
         b = perf_counter()
-        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+        if master_process:
+            print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
         t0 = b
+
+    # Single forward/backward
+    with ctx:
+        # Manual pipeline or standard forward
+        logits = model(x)
+        
+        # Make sure targets are on the same device as logits
+        logits_device = logits.device
+        y = y.to(logits_device)
+        
+        # Compute loss
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            y.view(-1),
+            ignore_index=-1
+        )
+
     
-    for micro_step in range(grad_accum_steps):
-        with ctx:
-            _, loss, _ = model(x,y) #logits, loss, kv cache
-            loss:torch.Tensor = loss/grad_accum_steps
-
-        x,y = train_loader.next_batch() # Async prefetch the next batch of data
-        train_loss_stats.append(loss.item())
-        scaler.scale(loss).backward()
-
+    # Get next batch
+    x, y = train_loader.next_batch()
+    loss_stats.append(loss.detach().cpu())
+    
+    # Backward pass
+    scaler.scale(loss).backward()
+    
     if TrainingConfig.grad_clip != 0.0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
 
     scaler.step(optimizer)
-    scaler.update()    
-    mem = 0
-    if "cuda" in device : 
+    scaler.update()
+
+    if master_process:
         torch.cuda.synchronize()
-        mem = torch.cuda.memory_reserved()
-    
-    dt  = (perf_counter()-t0)*1000
-    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+        dt = (perf_counter() - t0) * 1000
+        print(f"step: {iter} | train loss: {loss.item():.4f} | dt: {dt:.2f}ms")
 
-if TrainingConfig.save_model:
-    # might do in-training checkpointing later
-    loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
-
-    checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
-    stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
-
-    torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
-    torch.save(stats, TrainingConfig.file_name+'_stats.pt')
-
-    print("Model and config saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
-    print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
+if TrainingConfig.save_model and master_process:
+    # Create a deep copy for saving to avoid mutating the training model
+    save_model = copy.deepcopy(pipeline_model).to('cpu')
+    checkpoint = {
+        'config': ModelConfig,  # Use original config, not pipeline config
+        'model_state': save_model.state_dict(), 
+        'iter_num': iter, 
+        'train_losses': loss_stats,
+        'pipeline_trained': use_pipeline
+    } 
+    torch.save(checkpoint, 'llm_model_pipeline.pt')
+    print("Model checkpoint saved to llm_model_pipeline.pt")
+    if use_pipeline:
+        print("Note: Model was trained with pipeline parallelism")

@@ -40,6 +40,30 @@ from torch.utils.checkpoint import checkpoint
 
 from typing import Literal
 from dataclasses import dataclass 
+import torch.multiprocessing as mp
+from contextlib import nullcontext
+from packaging import version
+import os
+import glob
+import torch.distributed as dist  
+import sys
+import gc
+import datetime
+import torch
+import torch.distributed as dist
+
+import sys
+import gc
+import datetime
+import torch
+import torch.distributed as dist
+from time import perf_counter
+from math import ceil
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
+
 
 @dataclass
 class LLMconfig:
@@ -416,131 +440,67 @@ class Expert(nn.Module):
     def forward(self, x):
         return self.expert(x)
 
-'''
-class MoE(nn.Module):
-    
-    This class implements the DeepSeekMoE layer, featuring shared and routed experts.
-    It uses an Auxiliary-Loss-Free load balancing strategy with a dynamic bias term.
-    Ref: https://arxiv.org/pdf/2412.19437
-    
 
-    def __init__(self, config: LLMconfig):
-        super().__init__()
-        self.config = config
-        
-        # first `n_shared` are shared, the rest are routed
-        self.n_shared = config.n_shared
-        self.n_routed = config.n_exp - config.n_shared
-        
-        # Number of experts to activate from the ROUTED pool
-        self.n_act_routed = config.n_act - config.n_shared
-        assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
 
-        self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
-        self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
-        
-        if config.aux_free:
-            self.register_buffer('expert_bias', torch.zeros(self.n_routed))
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
-        B, T, C = x.shape
-        x_flat = x.view(-1, C)  # Shape: (B*T, C)
-        n_tokens = x_flat.shape[0]
 
-        # ___________ SHARED EXPERT PATH ___________
-
-        shared_output = torch.zeros_like(x_flat)
-        if self.n_shared > 0:
-            for i in range(self.n_shared):
-                shared_output += self.experts[i](x_flat) # bypass the router
-
-        #  ___________ ROUTED EXPERT PATH ___________
-
-        router_logits = self.gate(x_flat)
-
-        if self.config.aux_free:        
-            # Add Bias and then select topk
-            biased_router_logits = router_logits + self.expert_bias
-            topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
-
-            # Gating weights are based on un-biased logits
-            topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
-            topk_gates = F.softmax(topk_original_logits, dim=1)
-
-            # Calculate expert load and update bias during training only
-            with torch.no_grad():
-                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
-                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-                fi = fi_counts / n_tokens
-
-            if self.training:
-                with torch.no_grad():
-                    ideal_load = 1.0 / self.n_routed
-                    delta = ideal_load - fi 
-                    self.expert_bias += (self.config.gamma*delta)
-
-            router_probs = F.softmax(router_logits, dim=1)
-            pi = router_probs.mean(dim=0)
-            aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
-
-        else:
-            router_probs = F.softmax(router_logits, dim=1)
-            pi = router_probs.mean(dim=0)
-            
-            topk_logits, topk_indices = torch.topk(router_logits, self.n_act_routed, dim=1)
-            ones = torch.ones_like(topk_indices, dtype=torch.float)
-            fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-            fi = fi_counts / n_tokens
-
-            aux_loss = self.config.coeff * self.n_routed * torch.sum(pi * fi)
-
-            topk_gates = F.softmax(topk_logits, dim=1)  
-
-        # Dispatch
-        routed_output = torch.zeros_like(x_flat)
-
-        for i in range(self.n_routed):
-            token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
-            if token_indices.numel() > 0:
-                tokens_for_expert = x_flat[token_indices]
-                gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
-
-                # access the expert using an offset of `n_shared`
-                expert_output = self.experts[i + self.n_shared](tokens_for_expert)
-                
-                weighted_output = expert_output * gates_for_expert
-                routed_output.index_add_(0, token_indices, weighted_output)
-        
-        # combine to output
-        y = (shared_output + routed_output).view(B, T, C)
-        return y, aux_loss
 
 '''
-
-from math import ceil
-import torch
-import torch.distributed as dist
-import torch.nn as nn
-import torch.nn.functional as F
+The class handles the mapping between global expert IDs and their local placement across different GPU ranks in an Expert Parallel setup.
+'''
 
 class EPLayout:
     """Manages expert distribution across EP ranks"""
     def __init__(self, n_routed, world_size, rank):
+       
+
+        # Total number of routed experts
         self.n_routed = n_routed
+
+
+        # Total number of GPUs
         self.world_size = world_size
+
+
+        # Current GPU rank (0, 1, 2, ...)
         self.rank = rank
+
+        '''
+        Uses ceil() to ensure all experts are assigned, even if not perfectly divisible
+        Example: 10 experts, 3 GPUs → ceil(10/3) = 4 experts per GPU
+        '''
         self.n_local = ceil(n_routed / world_size)
+
+        # First expert on this GPU
         self.start = self.n_local * rank
+
+
+        # Last expert (+1)
         self.end = min(self.start + self.n_local, n_routed)
+
+        # Local expert IDs
         self.local_global_ids = list(range(self.start, self.end))
 
+
+    
+    # Find Expert Owner
+    # Given a global expert ID, find which GPU owns it
     def owner_rank(self, gid: int) -> int:
         return min(gid // self.n_local, self.world_size - 1)
 
+
+    # Convert to Local Index
+    # Convert global expert ID to local index within GPU
     def local_index(self, gid: int) -> int:
         return gid - self.start
 
+
+
+
+
+
+# This class implements Pure Expert Parallelism with distributed token 
+# routing across multiple GPUs using all_to_all communication.
 class MoE(nn.Module):
     '''
     Pure Expert Parallelism implementation with correct all-to-all token routing.
@@ -568,6 +528,7 @@ class MoE(nn.Module):
         self.n_act_routed = config.n_act - config.n_shared
         
         # Early return for shared-only layers
+        # Scenario: When all experts are shared (no routing needed)
         if self.n_routed == 0:
             self.shared_only = True
             if self.rank == 0:
@@ -834,6 +795,9 @@ class MoE(nn.Module):
             # Other ranks return zeros (they don't contribute to final output)
             return torch.zeros(B, T, C, device=device, dtype=dtype), torch.tensor(0.0, device=device)
 
+
+
+
     def _forward_shared_only(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for shared-only MoE layers"""
         if self.rank == 0:
@@ -845,6 +809,8 @@ class MoE(nn.Module):
             return shared_out.view(B, T, C), torch.tensor(0.0, device=x.device)
         else:
             return torch.zeros_like(x), torch.tensor(0.0, device=x.device)
+
+
 
     def _forward_single_gpu(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Fallback for single GPU (no EP)"""
@@ -911,6 +877,9 @@ class MoE(nn.Module):
         y = (shared_out + routed_output).view(B, T, C)
         return y, aux_loss
 
+
+
+
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         """Custom state_dict that includes only local experts for workers"""
         state_dict = super().state_dict(destination, prefix, keep_vars)
@@ -936,6 +905,9 @@ class MoE(nn.Module):
         else:
             # Rank 0 loads everything
             return super().load_state_dict(state_dict, strict=strict)
+
+
+
 
 
 
@@ -1590,15 +1562,28 @@ if TrainingConfig.save_model:
 '''
 
 
-import torch.multiprocessing as mp
-from contextlib import nullcontext
-from packaging import version
-import os
-import glob
-import torch.distributed as dist  # CRITICAL FIX: Added missing import
 
+'''
+What it does: Enables asynchronous error detection in NCCL (NVIDIA Collective Communications Library)
+Why important:
+
+Without this, a GPU failure might cause the program to hang indefinitely
+With this, errors are detected and reported immediately
+Critical for debugging distributed training issues
+'''
 # Set NCCL environment variables for stability
 os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
+
+
+'''
+What it does: Controls the verbosity of NCCL logging
+Levels:
+    WARN: Only shows warnings and errors (balanced)
+    INFO: More detailed information
+    VERSION: Just version info
+    TRACE: Maximum verbosity (for deep debugging)
+    Why WARN: Enough info to diagnose issues without log spam
+'''
 os.environ.setdefault('NCCL_DEBUG', 'WARN') 
 os.environ.setdefault('CUDA_DEVICE_MAX_CONNECTIONS', '1')
 # Make P2P configurable rather than default disabled
@@ -1609,113 +1594,65 @@ if os.getenv('NCCL_P2P_DISABLE') is None:
 assert version.parse(torch.__version__) >= version.parse("2.1.0"), \
     "EP MoE requires PyTorch >= 2.1.0 for autograd on all_to_all_single"
 
-# def setup_ep_groups(ep_size: int):
-#     """Initialize expert parallelism groups"""
-#     if not dist.is_initialized():
-#         dist.init_process_group(backend='nccl')
-    
-#     world_size = dist.get_world_size()
-#     rank = dist.get_rank()
-    
-#     if ep_size > world_size:
-#         raise ValueError(f"EP size ({ep_size}) cannot be larger than world size ({world_size})")
-    
-#     # For pure EP, use all GPUs in one EP group
-#     ep_group = dist.new_group(list(range(world_size)))
-#     ep_rank = rank
-    
-#     return ep_group, ep_rank, world_size
 
-import sys
-import gc
-import datetime
-import torch
-import torch.distributed as dist
+'''
+Worker GPUs only handle expert computation - they don't need the full model. This function creates a minimal model that:
 
-# def finalize_training(local_rank, train_loader=None, val_loader=None):
-#     """Robust cleanup function that ensures proper termination"""
-#     try:
-#         # Finish all device work
-#         if torch.cuda.is_available():
-#             torch.cuda.synchronize()
-#     except Exception:
-#         pass
+Contains only MoE layers (no attention, embeddings, etc.)
+Freezes all non-expert parameters to save memory
+Only unfreezes local experts for training
+Skips unnecessary computations (loss, output layers)
+'''
 
-#     # Close dataset memory maps (rank-0 created them)
-#     if local_rank == 0:
-#         try:
-#             if train_loader is not None and hasattr(train_loader, "close"):
-#                 train_loader.close()
-#             if val_loader is not None and hasattr(val_loader, "close"):
-#                 val_loader.close()
-#         except Exception:
-#             pass
-
-#     # Rendezvous and teardown process group
-#     if dist.is_available() and dist.is_initialized():
-#         try:
-#             dist.barrier()  # Ensure all ranks finish before teardown
-#         except Exception:
-#             pass
-#         try:
-#             dist.destroy_process_group()
-#         except Exception:
-#             pass
-
-#     # Free memory
-#     try:
-#         gc.collect()
-#         if torch.cuda.is_available():
-#             torch.cuda.empty_cache()
-#     except Exception:
-#         pass
-
-#     if local_rank == 0:
-#         print("✅ Training resources cleaned up successfully")
-
-# def setup_ep_groups(ep_size: int, local_rank: int, world_size: int):
-#     """Initialize expert parallelism groups with proper error handling"""
-#     # Use updated environment variable
-#     os.environ['TORCH_NCCL_ASYNC_ERROR_HANDLING'] = '1'
-    
-#     if not dist.is_initialized():
-#         try:
-#             dist.init_process_group(
-#                 backend='nccl' if torch.cuda.is_available() else 'gloo',
-#                 init_method='env://',
-#                 world_size=world_size,
-#                 rank=local_rank,
-#                 timeout=datetime.timedelta(seconds=180)
-#             )
-#         except Exception as e:
-#             print(f"Rank {local_rank}: Failed to initialize process group: {e}")
-#             raise
-    
-#     # Create EP group with all ranks
-#     ep_group = dist.new_group(list(range(world_size)))
-    
-#     return ep_group, local_rank, world_size
-
-
+# Its purpose is to drastically reduce the memory footprint on non-Rank 0 GPUs (the "workers") 
+# by ensuring they only store and compute the sharded expert weights and nothing else.
 def create_worker_model(config: LLMconfig, device: str, moe_layer_mask: list[bool]):
+
+    '''
+    Purpose: Thin wrapper around the MoE class
+    Why needed: Provides a consistent interface while stripping away all non-MoE components
+    Memory saving: No LayerNorm, residual connections, or other transformer block components
+    '''
+
     """Create a lightweight model for worker ranks (experts only)"""
+    # This class serves as a minimalist placeholder for a single MoE block in the transformer stack.
     class WorkerMoEBlock(nn.Module):
         """Minimal block containing only MoE layers for worker ranks"""
         def __init__(self, config):
             super().__init__()
+
+            # Only contains the MoE layer
             self.moe = MoE(config)
         
         def forward(self, x):
+            # Direct pass-through to MoE
             return self.moe(x)
     
+
+    # This is the main class that worker GPUs will use instead of the full LLM model.
     class WorkerLLM(nn.Module):
+        '''
+        moe_layer_mask is a boolean list from rank 0 indicating which layers are MoE
+        Example: [False, True, False, True, False, True] for a 6-layer model
+        Worker only creates blocks for True positions
+        Massive memory savings: No parameters for attention layers, LayerNorms, etc.
+        '''
         """Lightweight model for worker ranks containing only MoE layers"""
+        # This is the main, lightweight model instance created on all worker GPUs (ranks !=0)
+
         def __init__(self, config, moe_layer_mask):
             super().__init__()
             self.config = config
             self.moe_layer_mask = moe_layer_mask
             
             # Only create MoE blocks for layers that are actually MoE in the full model
+            '''
+            The code iterates through the moe_layer_mask (e.g., [False, True, False, True, ...]):
+            If a position is True (it's an MoE layer), it instantiates one WorkerMoEBlock (which contains the sharded MoE layer).
+            If it's False (it's a regular MLP layer or simply a layer to be skipped), nothing is added.
+        Result: The WorkerLLM only consists of an nn.ModuleList containing the exact MoE layers needed, ignoring all Attention, LayerNorm, and regular MLP parameters.
+
+            '''
             self.moe_blocks = nn.ModuleList()
             for i, is_moe in enumerate(moe_layer_mask):
                 if is_moe:
@@ -1732,7 +1669,11 @@ def create_worker_model(config: LLMconfig, device: str, moe_layer_mask: list[boo
                     for expert in block.moe.local_routed_experts:
                         for param in expert.parameters():
                             param.requires_grad = True
-        
+
+
+
+        # This function processes tokens through only the MoE layers that this worker GPU owns, 
+        # completely skipping all other layers (attention, embeddings, etc.).
         def forward(self, x, targets=None, kv_caches=None):
             # Workers only participate in MoE computation via all_to_all
             # They don't compute loss or final outputs
@@ -1743,6 +1684,7 @@ def create_worker_model(config: LLMconfig, device: str, moe_layer_mask: list[boo
             moe_block_idx = 0
             for i in range(self.config.n_layer):
                 if self.moe_layer_mask[i]:
+                    # Ensure we don't exceed available MoE blocks
                     # Only process MoE layers that exist in this worker model
                     if moe_block_idx < len(self.moe_blocks):
                         x, aux_loss = self.moe_blocks[moe_block_idx](x)
@@ -1754,6 +1696,9 @@ def create_worker_model(config: LLMconfig, device: str, moe_layer_mask: list[boo
             return None, None, kv_caches
     
     return WorkerLLM(config, moe_layer_mask).to(device)
+
+
+# This system handles checkpoint saving and resumption in a distributed environment where each GPU has different model components (experts).
 
 def find_latest_checkpoint(checkpoint_dir="checkpoints"):
     """Find the latest checkpoint iteration across all ranks"""
@@ -1774,6 +1719,9 @@ def find_latest_checkpoint(checkpoint_dir="checkpoints"):
             continue
     
     return max(iterations) if iterations else 0
+
+
+
 
 def save_checkpoint(model, optimizer, iter, rank, checkpoint_dir="checkpoints"):
     """Save checkpoint with distributed expert handling"""
@@ -1797,6 +1745,8 @@ def save_checkpoint(model, optimizer, iter, rank, checkpoint_dir="checkpoints"):
             'timestamp': torch.tensor(torch.timestamp()),
         }
         torch.save(metadata, f"{checkpoint_dir}/metadata_iter_{iter}.pt")
+
+
 
 def load_checkpoint(model, optimizer, checkpoint_dir="checkpoints", resume_iter=None):
     """Load checkpoint with distributed expert handling"""
@@ -1832,317 +1782,10 @@ def load_checkpoint(model, optimizer, checkpoint_dir="checkpoints", resume_iter=
         print(f"Rank {rank}: Checkpoint not found: {checkpoint_path}")
         return 0
 
-def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
-    """Worker function for expert parallelism"""
-
-    train_loader = None
-    val_loader = None
-
-    try:
-        # CRITICAL FIX: Use local_rank for device assignment (supports multi-node)
-        device = f'cuda:{local_rank}'
-        torch.cuda.set_device(local_rank)
-        
-        # Set deterministic seeds (same across ranks for reproducibility)
-        torch.manual_seed(42 + local_rank)  # Different expert params per rank
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(42 + local_rank)
-        
-        # Initialize distributed
-        dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=local_rank)
-        
-        # Setup expert parallelism - use ALL GPUs for EP
-        # ep_group, ep_rank, ep_size = setup_ep_groups(world_size)
-        ep_group, ep_rank, ep_size = setup_ep_groups(world_size, local_rank, world_size)
-        
-        # Verify world size matches EP size
-        if world_size != ep_size:
-            raise ValueError(f"World size {world_size} must equal EP size {ep_size} for pure EP")
-        
-        # Update config with EP info
-        # ModelConfig.ep_size = ep_size
-        # ModelConfig.ep_rank = ep_rank
-        # ModelConfig.ep_group = ep_group
-        # Create a copy of ModelConfig to avoid modifying the original
-        model_config_copy = LLMconfig(
-            vocab_size=ModelConfig.vocab_size,
-            block_size=ModelConfig.block_size,
-            n_embd=ModelConfig.n_embd,
-            pos_emb=ModelConfig.pos_emb,
-            up_dim=ModelConfig.up_dim,
-            non_linearity=ModelConfig.non_linearity,
-            dropout=ModelConfig.dropout,
-            n_layer=ModelConfig.n_layer,
-            moe=ModelConfig.moe,
-            n_exp=ModelConfig.n_exp,
-            n_shared=ModelConfig.n_shared,
-            n_act=ModelConfig.n_act,
-            coeff=ModelConfig.coeff,
-            aux_free=ModelConfig.aux_free,
-            alpha=ModelConfig.alpha,
-            gamma=ModelConfig.gamma,
-            attn=ModelConfig.attn,
-            n_head=ModelConfig.n_head,
-            n_kv_heads=ModelConfig.n_kv_heads,
-            q_latent_dim=ModelConfig.q_latent_dim,
-            kv_latent_dim=ModelConfig.kv_latent_dim,
-            rope_head_dim=ModelConfig.rope_head_dim,
-            act_recomp=ModelConfig.act_recomp,
-            # Set EP attributes
-            ep_size=ep_size,
-            ep_rank=ep_rank,
-            ep_group=ep_group
-        )
-        
-
-        # Setup AMP
-        device_type = 'cuda'
-        amp_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-        ctx = torch.amp.autocast(device_type=device_type, dtype=amp_dtype)
-        
-        # Different model creation for rank 0 vs workers
-        if local_rank == 0:
-            # Rank 0: full model
-            model = LLM(model_config_copy).to(device)
-            train_loader = DataLoader(B=TrainingConfig.batch_size, T=model_config_copy.block_size, 
-                                    file_path="train.bin", device=device)
-            total, active = model.get_num_params()
-            print(f"total parameters = {total:,}, active parameters = {active:,}")
-            
-            # Full optimizer for rank 0
-            optimizer = model.configure_optimizers(
-                weight_decay=0.1, 
-                learning_rate=TrainingConfig.learning_rate, 
-                device=device
-            )
-            scaler = torch.amp.GradScaler(enabled=(amp_dtype == torch.float16))
-            
-            # CRITICAL FIX: Create MoE layer mask to mirror full model structure
-            moe_layer_mask = []
-            for block in model.transformer.h:
-                moe_layer_mask.append(hasattr(block, 'moe') and block.is_moe)
-        else:
-            # Worker ranks need the MoE layer mask from rank 0
-            moe_layer_mask = [False] * model_config_copy.n_layer  # Placeholder
-            # Worker ranks get minimal loaders for cleanup consistency
-            train_loader = None
-            val_loader = None
-            
-        # Broadcast MoE layer mask from rank 0 to all workers
-        if world_size > 1:
-            moe_layer_mask_tensor = torch.tensor(moe_layer_mask, dtype=torch.bool, device=device)
-            dist.broadcast(moe_layer_mask_tensor, src=0)
-            moe_layer_mask = moe_layer_mask_tensor.cpu().tolist()
-        
-        if local_rank != 0:
-            # Worker ranks: lightweight model with only experts, mirroring rank 0's structure
-            model = create_worker_model(model_config_copy, device, moe_layer_mask)
-            train_loader = None
-            
-            # Local optimizer for worker experts only
-            local_params = []
-            for module in model.modules():
-                if hasattr(module, 'local_routed_experts'):
-                    for expert in module.local_routed_experts:
-                        local_params.extend([p for p in expert.parameters() if p.requires_grad])
-            
-            optimizer = torch.optim.AdamW(
-                local_params, 
-                lr=TrainingConfig.learning_rate,
-                weight_decay=0.1
-            )
-            # Workers don't use GradScaler
-            scaler = None
-        
-        # Get parameter dtype for dummy inputs
-        param_dtype = next(model.parameters()).dtype
-        
-        # Set model to training mode
-        model.train()
-        
-        # Training loop with corrected synchronization
-        start_iter = 0
-        
-        # Optional: load checkpoint
-        if TrainingConfig.save_model:
-            start_iter = load_checkpoint(model, optimizer)
-            # Ensure all ranks resume consistently and validate iteration
-            if world_size > 1:
-                start_iter_tensor = torch.tensor(start_iter, device=device)
-                dist.broadcast(start_iter_tensor, src=0)
-                start_iter = start_iter_tensor.item()
-        
-        for iter in range(start_iter, TrainingConfig.max_iters + 1):
-
-            t0 = perf_counter()
-
-            # Learning rate scheduling
-            lr = get_lr(iter, TrainingConfig) 
-            for param_grp in optimizer.param_groups:
-                param_grp['lr'] = lr
-            
-
-            # Zero gradients on all ranks
-            optimizer.zero_grad(set_to_none=True)
-            
-            if local_rank == 0:
-                # Get batch and forward/backward on rank 0
-                x, y = train_loader.next_batch()
-                
-                # Forward pass (includes EP communication)
-                with ctx:
-                    _, loss, _ = model(x, y)
-                
-                # Backward pass
-                scaler.scale(loss).backward()
-            else:
-                # Worker ranks: dummy forward to trigger EP communication and gradients
-                # Use a small dummy input to minimize memory usage
-                dummy_x = torch.zeros(1, 1, ModelConfig.n_embd, device=device, dtype=param_dtype)
-                with ctx:
-                    _, _, _ = model(dummy_x)
-                # No backward on workers - gradients flow via autograd through collectives
-            
-            # CRITICAL: Ensure backward is finished before stepping
-            dist.barrier()
-            
-            # Optimization step
-            if local_rank == 0:
-                if TrainingConfig.grad_clip != 0.0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
-                
-                scaler.step(optimizer)
-                scaler.update()
-
-                # Synchronize and measure time
-                if "cuda" in device:
-                    torch.cuda.synchronize()
-                dt = (perf_counter() - t0) * 1000  # Convert to milliseconds
-                
-                # Memory usage
-                if torch.cuda.is_available():
-                    mem_gb = torch.cuda.max_memory_allocated(device) / (1024**3)  # Convert to GB
-                    torch.cuda.reset_peak_memory_stats(device)
-                else:
-                    mem_gb = 0.0
-                
-                if local_rank == 0:
-                    print(f"step: {iter} | train loss:{total_loss * grad_accum_steps:.4f} | "
-          f"dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | "
-          f"GPU RAM: {mem_gb:.2f}GB")
-
-                # Final iteration - save checkpoint and prepare for termination
-                if iter == TrainingConfig.max_iters:
-                    if local_rank == 0:
-                        print(f"🎉 Training completed all {TrainingConfig.max_iters} iterations!")
-
-                    # Save final checkpoint on rank 0
-                    if TrainingConfig.save_model and local_rank == 0:
-                        save_checkpoint(model, optimizer, TrainingConfig.max_iters, local_rank)
-                        print("💾 Final checkpoint saved")
-
-                    # Ensure all ranks finish before cleanup
-                    if dist.is_initialized():
-                        dist.barrier()
-
-            else:
-                # Worker optimization (no scaler)
-                if TrainingConfig.grad_clip != 0.0:
-                    torch.nn.utils.clip_grad_norm_(local_params, TrainingConfig.grad_clip)
-                
-                optimizer.step()
-            
-            # Save checkpoint periodically
-            if TrainingConfig.save_model and iter % TrainingConfig.eval_interval == 0 and iter > 0:
-                save_checkpoint(model, optimizer, iter, local_rank)
-            
-            # Final synchronization (keep for correctness, can optimize later)
-            dist.barrier()
-    except KeyboardInterrupt:
-        if local_rank == 0:
-            print("⏹️ Training interrupted by user")
-        # Save partial checkpoint if desired
-        if TrainingConfig.save_model and local_rank == 0:
-            save_checkpoint(model, optimizer, iter, local_rank)
-            print("💾 Partial checkpoint saved")
-        raise
-        
-    except Exception as e:
-        print(f"Rank {local_rank}: Training error: {e}")
-        raise
-        
-    finally:
-        # GUARANTEED cleanup - this will always run
-        finalize_training(local_rank, train_loader, val_loader)
-        
-        if local_rank == 0:
-            print("🏁 Worker process completed and cleaned up")
-
-# def main():
-    
-
-#     world_size = int(os.environ["WORLD_SIZE"])
-#     local_rank = int(os.environ["LOCAL_RANK"])
-#     main_worker(local_rank, world_size, TrainingConfig, ModelConfig)
-
-# if __name__ == "__main__":
-#     main()
-
-# def main():
-#     """Main function for torchrun launch method"""
-#     try:
-#         # Get distributed setup from environment variables (torchrun sets these)
-#         world_size = int(os.environ["WORLD_SIZE"])
-#         local_rank = int(os.environ["LOCAL_RANK"])
-        
-#         print(f"🚀 Starting torchrun training - Rank {local_rank}/{world_size-1}")
-#         print(f"📊 Target: {TrainingConfig.max_iters} iterations")
-        
-#         # Call the worker function
-#         main_worker(local_rank, world_size, TrainingConfig, ModelConfig)
-        
-#         # If we reach here, training completed successfully
-#         if local_rank == 0:
-#             print("✅ All training iterations completed successfully")
-            
-#     except KeyboardInterrupt:
-#         if 'local_rank' in locals() and local_rank == 0:
-#             print("⏹️ Training interrupted by user")
-#         # Re-raise to ensure torchrun sees the interruption
-#         raise
-        
-#     except Exception as e:
-#         print(f"❌ Training failed: {e}")
-#         # Re-raise to ensure torchrun propagates the error
-#         raise
-        
-#     finally:
-#         # Final cleanup in the main process
-#         if 'local_rank' in locals() and local_rank == 0:
-#             print("🧹 Final cleanup completed")
-        
-#         # Force garbage collection
-#         import gc
-#         gc.collect()
-#         if torch.cuda.is_available():
-#             torch.cuda.empty_cache()
-
-# if __name__ == "__main__":
-#     main()
-#     # torchrun will handle process termination, no need for sys.exit() here
 
 
 
 
-
-
-import sys
-import gc
-import datetime
-import torch
-import torch.distributed as dist
-from time import perf_counter
 
 def finalize_training(local_rank, train_loader=None, val_loader=None):
     """Robust cleanup function that ensures proper termination"""
@@ -2209,6 +1852,25 @@ def setup_ep_groups(ep_size: int, local_rank: int, world_size: int):
     
     return ep_group, local_rank, world_size
 
+
+'''
+Rank 0 (Orchestrator):
+├── Shared Experts: [Expert_A, Expert_B]     ← Process ALL tokens locally
+├── Routed Experts: [Expert_0, Expert_1, Expert_2, Expert_3]  ← Local shard
+└── Gate Network: Decides token routing
+
+Rank 1 (Worker):
+├── Shared Experts: ❌ NONE
+└── Routed Experts: [Expert_4, Expert_5, Expert_6]  ← Local shard
+
+Rank 2 (Worker): 
+├── Shared Experts: ❌ NONE
+└── Routed Experts: [Expert_7, Expert_8, Expert_9]  ← Local shard
+
+Rank 3 (Worker):
+├── Shared Experts: ❌ NONE  
+└── Routed Experts: [Expert_10, Expert_11, Expert_12, Expert_13]  ← Local shard
+'''
 def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
     """Worker function with detailed step printing and proper termination"""
     train_loader = None
@@ -2299,6 +1961,14 @@ def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
             
             # CRITICAL FIX: Create MoE layer mask to mirror full model structure
             moe_layer_mask = []
+            '''
+            Example Output:
+
+            For a 6-layer model with MoE at layers 1, 3, 5:
+                moe_layer_mask = [False, True, False, True, False, True]
+                    # Layer:   0       1       2       3       4       5
+                    # Type:    Attn    MoE     Attn    MoE     Attn    MoE
+            '''
             for block in model.transformer.h:
                 moe_layer_mask.append(hasattr(block, 'moe') and block.is_moe)
                 
@@ -2312,6 +1982,17 @@ def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
             val_loader = None
             
         # Broadcast MoE layer mask from rank 0 to all workers
+        '''
+        Before Broadcast:
+        Rank 0: [False, True, False, True, False, True]  ← Real mask
+        Rank 1: [False, False, False, False, False, False] ← Placeholder  
+        Rank 2: [False, False, False, False, False, False] ← Placeholder
+
+        After Broadcast:
+        Rank 0: [False, True, False, True, False, True]  ← Real mask
+        Rank 1: [False, True, False, True, False, True]  ← Real mask
+        Rank 2: [False, True, False, True, False, True]  ← Real mask
+        '''
         if world_size > 1:
             moe_layer_mask_tensor = torch.tensor(moe_layer_mask, dtype=torch.bool, device=device)
             dist.broadcast(moe_layer_mask_tensor, src=0)
@@ -2426,26 +2107,7 @@ def main_worker(local_rank, world_size, TrainingConfig, ModelConfig):
                       f"dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | "
                       f"GPU RAM: {mem_gb:.2f}GB")
 
-            # VALIDATION RUN - Every eval_interval steps and on final iteration
-            # if (TrainingConfig.eval and 
-            #     local_rank == 0 and 
-            #     (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and 
-            #     iter != 0):
-                
-            #     eval_start = perf_counter()
-            #     losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-            #     eval_time = (perf_counter() - eval_start) * 1000
-            #     print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {eval_time:.2f}ms")
-
-            # a,b = 0,0
-            # if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
-            #     a = perf_counter()
-            #     losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-            #     valrun_val_loss_stats.append(losses['val'])
-            #     valrun_train_loss_stats.append(losses['train'])
-            #     b = perf_counter()
-            #     print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
-            #     t0 = b
+            
             
             # Save checkpoint periodically
             if TrainingConfig.save_model and iter % TrainingConfig.eval_interval == 0 and iter > 0 and local_rank == 0:
@@ -2529,4 +2191,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # torchrun will handle process termination, no need for sys.exit() here

@@ -410,58 +410,6 @@ class Expert(nn.Module):
     def forward(self, x):
         return self.expert(x)
 
-
-
-
-'''
-
-ModelConfig = LLMconfig(
-    # token params
-    vocab_size = 50304, 
-    block_size = 2**10,
-    n_embd = 256, 
-    pos_emb = 'rope',
-    
-    # MoE
-    moe = True,
-
-    up_dim = 384, 
-    non_linearity = 'swiglu',  
-    dropout=0.0,
-    n_layer = 6,
-
-    n_exp = 16,
-    n_shared = 2,
-    n_act = 8,        ### INCLUDES THE SHARED EXPERTS
-
-    coeff=0.01,
-    aux_free=True,
-    alpha = 0.0001,
-    gamma = 0.001,
-
-    # Attention
-    attn = 'mla', 
-    n_head = 8,
-    n_kv_heads=4,
-    # MHLA
-    q_latent_dim = 32, 
-    kv_latent_dim = 32,
-    rope_head_dim = 16,
-    
-    act_recomp=TrainingConfig.act_recomp)    # Link the activation recomputation from the TRaining params           
-
-
-
-'''
-
-
-
-'''
-Inheritance: Inherits from nn.Module, making it a PyTorch neural network layer
-Purpose: Implements a sophisticated MoE system based on DeepSeek's research
-Key Innovation: Uses "Auxiliary-Loss-Free" load balancing instead of traditional auxiliary losses
-'''
-
 class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.
@@ -470,189 +418,54 @@ class MoE(nn.Module):
     '''
 
     def __init__(self, config: LLMconfig):
-        '''
-        Stores the entire model configuration for access throughout the class
-        Calls parent nn.Module constructor to initialize PyTorch module properly
-        '''
         super().__init__()
         self.config = config
         
-
-        '''
-        Shared Experts: Always process ALL tokens (like regular feed-forward layers)
-        Routed Experts: Only process tokens assigned to them by the gating mechanism
-        Example: If n_exp = 16 and n_shared = 2:
-
-        Experts 0-1: Shared experts (always active)
-        Experts 2-15: Routed experts (selectively activated)
-        '''
         # first `n_shared` are shared, the rest are routed
         self.n_shared = config.n_shared
         self.n_routed = config.n_exp - config.n_shared
-
-
-
-        # config.n_act: Total number of experts to activate per token
-        # self.n_act_routed: How many routed experts to activate per token
+        
         # Number of experts to activate from the ROUTED pool
         self.n_act_routed = config.n_act - config.n_shared
-        '''
-        Example: If n_act = 8 and n_shared = 2:
-        2 shared experts always process every token
-        6 routed experts are selectively chosen per token
-        Assertion: Ensures we actually use some routed experts (otherwise MoE is pointless)
-        '''
         assert self.n_act_routed > 0, "Number of active experts must be greater than shared experts"
 
-
-        '''
-        What This Creates:
-
-        A list containing config.n_exp independent Expert modules
-        Each Expert is a feed-forward network (MLP) as defined elsewhere in the code
-        ModuleList: PyTorch container that properly registers sub-modules for parameter tracking
-        Memory Impact: This is the most expensive part - each expert has its own parameters
-        '''
-
         self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_exp)])
-
-
-        '''
-        Gating Function Details:
-        Input: Token embeddings of shape (batch_size, seq_len, n_embd)
-        Output: Router logits of shape (batch_size, seq_len, n_routed)
-        Purpose: For each token, produces scores indicating which routed experts should process it
-        No Bias: bias=False means it's a pure linear transformation without additive bias
-        Why only n_routed outputs?: Because shared experts don't need routing - they always get all tokens
-        '''
         self.gate = nn.Linear(config.n_embd, self.n_routed, bias=False)
-
-
-        '''
-        Innovative Load Balancing:
-
-        Traditional Approach:
-
-        Uses auxiliary loss to encourage balanced expert usage
-        Adds complexity to training objective
-        Auxiliary-Loss-Free Approach:
-
-        Expert Bias: Learnable (but manually updated) biases for each routed expert
-        Purpose: Dynamically adjusts expert selection probabilities to balance load
-        register_buffer: Creates persistent state that's part of the module but not a learnable parameter
-        Initial State: All biases start at zero (no initial preference)
-        Update Mechanism: Biases are updated during training based on actual expert usage patterns
-        '''
         
         if config.aux_free:
             self.register_buffer('expert_bias', torch.zeros(self.n_routed))
 
-
-
-
-
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """ Forward pass for the DeepSeekMoE layer with Aux-Loss-Free Balancing. """
-
-
-        '''
-        Input: x has shape (B, T, C) = (batch_size, sequence_length, embedding_dim)
-        Flattening: Reshapes to (B*T, C) to treat each token independently
-        Why flatten?: MoE routing operates per-token, not per-sequence
-        Example: If B=4, T=128, C=512 → x_flat becomes (512, 512)
-        '''
         B, T, C = x.shape
         x_flat = x.view(-1, C)  # Shape: (B*T, C)
         n_tokens = x_flat.shape[0]
 
-        # number of tokens that we need to process = n_tokens
-
         # ___________ SHARED EXPERT PATH ___________
 
-
-        '''
-        Detailed breakdown:
-        Initialize output: Creates zero tensor same shape as x_flat
-        Shared experts: Always process ALL tokens (no routing decision)
-        Sequential processing: Each shared expert processes the entire batch
-        Additive combination: Sums outputs from all shared experts
-        Bypass router: Shared experts don't use gating mechanism
-        '''
         shared_output = torch.zeros_like(x_flat)
         if self.n_shared > 0:
             for i in range(self.n_shared):
                 shared_output += self.experts[i](x_flat) # bypass the router
 
-
-        # till now:
-        # number of tokens that we need to process = n_tokens
-        #  each of the token has passed through all of the shared expert
-
         #  ___________ ROUTED EXPERT PATH ___________
 
-
-        '''
-        Gating operation:
-        Input: x_flat shape (B*T, C)
-        Gate layer: nn.Linear(C, n_routed) produces (B*T, n_routed) logits
-        Each value: Represents "affinity score" between token and expert
-        '''
-        
-        # here we router_logit matrix (Number of tokens , Number of routing experts)
         router_logits = self.gate(x_flat)
 
-
-
-        # Auxiliary-Loss-Free Branch
-
-        if self.config.aux_free:
-
-            '''
-            Add bias: expert_bias encourages underutilized experts to be selected more often
-            Top-K: Selects indices of top n_act_routed experts for each token
-            Output:
-
-            topk_biased_logits: Values of top-k logits (not used later)
-            topk_indices: Which experts were selected for each token
-            '''        
+        if self.config.aux_free:        
             # Add Bias and then select topk
             biased_router_logits = router_logits + self.expert_bias
             topk_biased_logits, topk_indices = torch.topk(biased_router_logits, self.n_act_routed, dim=1)
 
-            # Til now, we get topk_indices: Which experts were selected for each token
-
-            '''
-            Gather: Gets the original (unbiased) logits for the selected experts
-            Why unbiased?: Final gating weights should reflect true token-expert affinity, not load balancing adjustments
-            Softmax: Converts logits to probability distribution over selected experts
-            '''
             # Gating weights are based on un-biased logits
             topk_original_logits = torch.gather(router_logits, 1, topk_indices) 
             topk_gates = F.softmax(topk_original_logits, dim=1)
 
-
-            '''
-            ones: Creates tensor of 1s same shape as topk_indices
-            scatter_add_: For each expert index in topk_indices, adds 1 to the count
-            Example: If token 0 uses experts [2,5] and token 1 uses [2,7]:
-
-            Expert 2 gets +2, experts 5 and 7 get +1 each
-            fi: Fraction of tokens assigned to each expert (load distribution)
-            '''
             # Calculate expert load and update bias during training only
             with torch.no_grad():
                 ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
                 fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
                 fi = fi_counts / n_tokens
-
-
-            '''
-            Load balancing logic:
-            Ideal load: Perfectly balanced = each expert gets 1/n_routed of tokens
-            Delta: Difference between ideal and actual load
-            Bias update: Increases bias for underutilized experts (negative delta), decreases for overutilized
-            Gamma: Learning rate for bias updates
-            '''
 
             if self.training:
                 with torch.no_grad():
@@ -660,26 +473,11 @@ class MoE(nn.Module):
                     delta = ideal_load - fi 
                     self.expert_bias += (self.config.gamma*delta)
 
-
-            '''
-            Aux-loss-free "aux loss":
-            router_probs: Softmax over all experts (not just selected ones)
-            pi: Average probability of selecting each expert across all tokens
-            pi * fi: Dot product between expected and actual usage
-            Loss purpose: Encourages alignment between router preferences and actual assignments
-            '''
-
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
             aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
 
         else:
-            '''
-            Differences from aux-free:
-            No bias: Uses raw router logits for expert selection
-            Standard aux loss: Same pi * fi dot product but different coefficient
-            Simplicity: No dynamic bias updates
-            '''
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
             
@@ -692,149 +490,14 @@ class MoE(nn.Module):
 
             topk_gates = F.softmax(topk_logits, dim=1)  
 
-
-        '''
-        Expert processing loop:
-        Find tokens for expert i:
-
-        (topk_indices == i).nonzero() gets indices of tokens that selected expert i
-        Returns token_indices (which tokens) and topk_slot (which of the k slots)
-        Process tokens:
-
-        Extract tokens assigned to this expert
-        Get their corresponding gating weights
-        Pass through the expert network
-        Weight and accumulate:
-
-        Multiply expert output by gating weight
-        Use index_add_ to place results back in correct positions
-        '''
-
         # Dispatch
-        '''
-        What this creates:
-        A zero-initialized tensor with the exact same shape as x_flat
-        Shape: (B*T, C) where:
-
-        B*T = total number of tokens across batch and sequence
-        C = embedding dimension
-        Purpose: This will accumulate outputs from all routed experts
-        Why zeros?: We'll add expert outputs to their respective positions
-        '''
         routed_output = torch.zeros_like(x_flat)
 
-
-        '''
-        Iterates over each routed expert (not shared experts)
-        i ranges from 0 to n_routed-1
-        Important: i refers to the routed expert index, not the absolute expert index
-        '''
         for i in range(self.n_routed):
-            # Token-Expert Assignment Detection
-            '''
-            Understanding topk_indices
-            Shape: (B*T, n_act_routed) - for each token, stores indices of selected experts
-            Example: If topk_indices[0] = [2, 5, 7], token 0 uses routed experts 2, 5, and 7
-            The (topk_indices == i) Operation
-
-            Creates a boolean mask where True indicates token j selected expert i in slot k
-            Shape: Same as topk_indices - (B*T, n_act_routed)
-            nonzero(as_tuple=True) - The Critical Operation
-
-            Input: Boolean mask from previous step
-            Output: Two tensors:
-
-            token_indices: Which tokens selected this expert
-            topk_slot: Which of the k slots (0 to n_act_routed-1) this expert was selected in
-
-            topk_indices = tensor([[2, 5, 7],   # Token 0: experts 2,5,7
-                                [1, 2, 4],   # Token 1: experts 1,2,4  
-                                [0, 2, 6]])  # Token 2: experts 0,2,6
-
-            For i=2 (expert 2):
-            (topk_indices == 2) = tensor([[True, False, False],
-                                        [False, True, False], 
-                                        [False, True, False]])
-
-            nonzero(as_tuple=True) returns:
-            token_indices = tensor([0, 1, 2])  # Tokens 0,1,2 use expert 2
-            topk_slot    = tensor([0, 1, 1])   # In slots 0,1,1 respectively
-
-
-            # Suppose we have 3 tokens and select top 3 experts per token
-            topk_indices = torch.tensor([
-                [2, 5, 7],   # Token 0 selected experts 2, 5, 7
-                [1, 2, 4],   # Token 1 selected experts 1, 2, 4  
-                [0, 2, 6]    # Token 2 selected experts 0, 2, 6
-            ])
-
-            # For expert i=2:
-            mask = (topk_indices == 2)
-            # mask becomes:
-            # tensor([[True,  False, False],  # Token 0: expert 2 in slot 0
-            #         [False, True,  False],  # Token 1: expert 2 in slot 1  
-            #         [False, True,  False]]) # Token 2: expert 2 in slot 1
-            '''
             token_indices, topk_slot = (topk_indices == i).nonzero(as_tuple=True)
-
-            '''
-            # token_indices = tensor([0, 1, 2])  # Which tokens: tokens 0, 1, 2
-            # topk_slot    = tensor([0, 1, 1])   # Which slots: slot 0, 1, 1
-            '''
-
-
-            '''
-            Purpose: Skip experts that have no tokens assigned to them
-
-            numel(): Returns number of elements in tensor
-            If zero: No tokens selected this expert, skip computation
-            Efficiency: Avoids unnecessary expert network computations
-            '''
             if token_indices.numel() > 0:
-
-                '''
-                x_flat has shape (B*T, C) - all tokens flattened
-                token_indices tells us which rows (tokens) to extract
-                Result: A tensor containing only the tokens assigned to this expert
-
-                Example:
-
-                If token_indices = [0, 1, 2] and C = 512
-                tokens_for_expert shape: (3, 512) - 3 tokens, each with 512-dimensional embeddings
-                '''
                 tokens_for_expert = x_flat[token_indices]
-
-
-
-                '''
-                Understanding topk_gates:
-                Shape: (B*T, n_act_routed) - gating weights for selected experts
-                Values: Softmax probabilities (sum to 1.0 per token)
-                Purpose: How much each expert should contribute to the final output
-                Advanced indexing:
-
-                topk_gates[token_indices, topk_slot] gets specific gate weights
-                For our example: gets weights for (token0,slot0), (token1,slot1), (token2,slot1)
-                unsqueeze(1) - Dimension adjustment:
-
-                Before: Shape (3) - scalar weights [w0, w1, w2]
-                After: Shape (3, 1) - column vector [[w0], [w1], [w2]]
-                Why?: Enables broadcasting in multiplication
-                '''
                 gates_for_expert = topk_gates[token_indices, topk_slot].unsqueeze(1)
-
-
-                '''
-                Expert indexing:
-                i + self.n_shared converts routed index to absolute index
-                Example: If n_shared = 2 and i = 2 → expert index 4
-                Expert forward pass:
-
-                Each expert is an MLP network
-                Input: tokens_for_expert shape (num_tokens, C)
-                Output: expert_output shape (num_tokens, C)
-                Key efficiency: Only computes for assigned tokens!
-                '''
 
                 # access the expert using an offset of `n_shared`
                 expert_output = self.experts[i + self.n_shared](tokens_for_expert)
@@ -845,10 +508,6 @@ class MoE(nn.Module):
         # combine to output
         y = (shared_output + routed_output).view(B, T, C)
         return y, aux_loss
-
-
-
-
 
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
@@ -1142,6 +801,7 @@ class Trainconfig:
     save_model : bool
     file_name : str
     act_recomp : bool
+    wandb_log : bool
 
 
 
@@ -1159,6 +819,7 @@ TrainingConfig = Trainconfig(
     compile = False if os.name != 'posix' else True,
     save_model = True,
     file_name='llm_model',
+    wandb_log=1,
     act_recomp=False)   # Default to False
 
 ModelConfig = LLMconfig(
@@ -1242,6 +903,7 @@ def parse_args():
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
     parser.add_argument('--file_name', type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
+
 
     return parser.parse_args()
 
@@ -1408,56 +1070,181 @@ x,y = train_loader.next_batch() # get the first batch of training data
 train_loss_stats = []
 valrun_val_loss_stats = []
 valrun_train_loss_stats = []
+
+if TrainingConfig.wandb_log:
+    import wandb ; from copy import deepcopy
+
+    dummy_config = deepcopy(ModelConfig)
+    
+    # only the following 2 lines are important
+    wandb_config = {'total':total, 'active':active, **vars(TrainingConfig), **vars(dummy_config)}
+    wandb.init(project="moe-code", 
+               name="analyse-moe-code",
+               config=wandb_config)
+    
+    del wandb_config, dummy_config # free up RAM
+
+
+
+# for iter in range(TrainingConfig.max_iters+1):
+#     t0 = perf_counter()
+
+#     lr = get_lr(iter, TrainingConfig) 
+#     for param_grp in optimizer.param_groups:
+#         param_grp['lr'] = lr
+    
+
+
+
+#     optimizer.zero_grad(set_to_none=True)
+#     a,b = 0,0
+#     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+#         a = perf_counter()
+#         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+#         valrun_val_loss_stats.append(losses['val'])
+#         valrun_train_loss_stats.append(losses['train'])
+#         b = perf_counter()
+#         print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+#         t0 = b
+#         # log to wandb
+#         if TrainingConfig.wandb_log:
+#             wandb.log({
+#                 'eval/train_loss': losses['train'],
+#                 'eval/val_loss': losses['val']
+#             }, step=iter)
+    
+#     for micro_step in range(grad_accum_steps):
+#         with ctx:
+#             _, loss, _ = model(x,y) #logits, loss, kv cache
+#             loss:torch.Tensor = loss/grad_accum_steps
+
+#         x,y = train_loader.next_batch() # Async prefetch the next batch of data
+#         train_loss_stats.append(loss.item())
+#         scaler.scale(loss).backward()
+
+#     if TrainingConfig.grad_clip != 0.0:
+#         scaler.unscale_(optimizer)
+#         torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
+
+#     scaler.step(optimizer)
+#     scaler.update()    
+#     mem = 0
+#     if "cuda" in device : 
+#         torch.cuda.synchronize()
+#         mem = torch.cuda.memory_reserved()
+    
+#     dt  = (perf_counter()-t0)*1000
+#     print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+
+# if TrainingConfig.save_model:
+#     # might do in-training checkpointing later
+#     loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
+
+#     checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
+#     stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+
+#     torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
+#     torch.save(stats, TrainingConfig.file_name+'_stats.pt')
+
+#     print("Model and config saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
+#     print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
+
+
 for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
 
+    # Get learning rate and update optimizer
     lr = get_lr(iter, TrainingConfig) 
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
+    # Reset gradients
     optimizer.zero_grad(set_to_none=True)
-    a,b = 0,0
-    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
-        a = perf_counter()
-        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-        valrun_val_loss_stats.append(losses['val'])
-        valrun_train_loss_stats.append(losses['train'])
-        b = perf_counter()
-        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
-        t0 = b
     
+    # Forward pass and backward pass with gradient accumulation
+    total_loss = 0.0
     for micro_step in range(grad_accum_steps):
         with ctx:
-            _, loss, _ = model(x,y) #logits, loss, kv cache
-            loss:torch.Tensor = loss/grad_accum_steps
+            _, loss, _ = model(x, y)  # logits, loss, kv cache
+            scaled_loss = loss / grad_accum_steps
+            total_loss += loss.item()  # Track unscaled loss for logging
 
-        x,y = train_loader.next_batch() # Async prefetch the next batch of data
-        train_loss_stats.append(loss.item())
-        scaler.scale(loss).backward()
+        # Get next batch (async prefetch)
+        x, y = train_loader.next_batch()
+        
+        # Backward pass
+        scaler.scale(scaled_loss).backward()
+        
+        # Log micro-step progress if needed
+        if TrainingConfig.wandb_log:
+            wandb.log({
+                'train/micro_step_loss': loss.item(),
+                'train/micro_step': micro_step,
+                'step': iter * grad_accum_steps + micro_step
+            })
 
+    # Gradient clipping
     if TrainingConfig.grad_clip != 0.0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
 
+    # Optimizer step
     scaler.step(optimizer)
-    scaler.update()    
+    scaler.update()
+    
+    # Synchronize and measure memory
     mem = 0
-    if "cuda" in device : 
+    if "cuda" in device: 
         torch.cuda.synchronize()
         mem = torch.cuda.memory_reserved()
     
-    dt  = (perf_counter()-t0)*1000
-    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+    # Calculate iteration time
+    dt = (perf_counter() - t0) * 1000
+    avg_loss = total_loss / grad_accum_steps
+    
+    # Store training stats
+    train_loss_stats.append(avg_loss)
+    
+    print(f"step: {iter} | train loss: {avg_loss:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+    
+    # WandB logging - MOVED TO AFTER TRAINING STEP
+    if TrainingConfig.wandb_log:
+        wandb.log({
+            'train/loss': avg_loss,  # Use averaged loss
+            'train/lr': lr,
+            'train/grad_accum_steps': grad_accum_steps,
+            'train/iter_time_ms': dt,
+            'train/GPU_RAM_GB': mem/1024**3
+        }, step=iter)
 
+    # Validation run
+    if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
+        val_start = perf_counter()
+        losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+        val_time = (perf_counter() - val_start) * 1000
+        
+        valrun_val_loss_stats.append(losses['val'])
+        valrun_train_loss_stats.append(losses['train'])
+        
+        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {val_time:.4f}ms")
+        
+        # Log validation to wandb
+        if TrainingConfig.wandb_log:
+            wandb.log({
+                'eval/train_loss': losses['train'],
+                'eval/val_loss': losses['val'],
+                'eval/val_time_ms': val_time
+            }, step=iter)
+
+# Model saving (your original code is fine here)
 if TrainingConfig.save_model:
-    # might do in-training checkpointing later
-    loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
+    loss_stats = {'train': train_loss_stats, 'valrun_val': valrun_val_loss_stats, 'valrun_train': valrun_train_loss_stats}
 
-    checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
-    stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+    checkpoint = {'model_config': ModelConfig, 'train_config': TrainingConfig, 'model_state': model.state_dict()}
+    stats = {'model_config': ModelConfig, 'train_config': TrainingConfig, 'losses': loss_stats, 'total_params': total, 'active_params': active}
 
-    torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
-    torch.save(stats, TrainingConfig.file_name+'_stats.pt')
+    torch.save(checkpoint, TrainingConfig.file_name + '_ckpt.pt')
+    torch.save(stats, TrainingConfig.file_name + '_stats.pt')
 
     print("Model and config saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
     print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))
