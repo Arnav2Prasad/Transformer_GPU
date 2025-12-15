@@ -3655,7 +3655,6 @@ else:
         
 
         if master_process:
-            print('before torch.cuda.sync()')
             torch.cuda.synchronize()
             dt = (perf_counter() - t0) * 1000
             
