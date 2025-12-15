@@ -2019,29 +2019,43 @@ if cp_code == 1:
 
 
 # _______________ DATASET _________________
+import os
+
 def tokenize_and_save():
-    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+    # Check if both train.bin and val.bin already exist
+    if os.path.exists('train.bin') and os.path.exists('val.bin'):
+        print("Dataset files already exist. Skipping download and tokenization.")
+        return
+    
+    url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt"
     try:
+        print("Downloading TinyStories dataset...")
         response = requests.get(url)
-        response.raise_for_status()  # This will raise an error for bad responses (4xx or 5xx)
+        response.raise_for_status()
         text = response.text
+        print("Download complete!")
     except requests.exceptions.RequestException as e:
         print(f"Error downloading the dataset: {e}")
-        return # Exit the function if download fails
-
+        return
+    
+    print("Tokenizing dataset...")
     enc = tiktoken.get_encoding("gpt2")
     tokens = enc.encode(text)
     tokens = np.array(tokens, dtype=np.uint16)
-
     n = int(0.9 * len(tokens))
     train_data = tokens[:n]
     val_data = tokens[n:]
-
     data_splits = {'train': train_data, 'val': val_data}
+    
+    print("Saving tokenized data...")
     for split, data in data_splits.items():
         file_path = f'{split}.bin'
         with open(file_path, 'wb') as f:
             f.write(data.tobytes())
+        print(f"Saved {file_path}")
+    
+    print("Dataset preparation complete!")
+
 
 tokenize_and_save() # Using The Tiny Shakespeare dataset for demo
 
