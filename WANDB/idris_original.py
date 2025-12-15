@@ -3253,6 +3253,59 @@ print_all_gpu_memory("Initial")
 import torch.profiler as profiler
 from torch.profiler import tensorboard_trace_handler
 
+
+def export_operator_stats_fixed(prof, filename):
+    """Export detailed operator statistics to CSV - fixed"""
+    import csv
+    
+    try:
+        events = prof.key_averages()
+        
+        with open(f"{filename}_operator_stats.csv", 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Operator', 'CPU Time (ms)', 'CUDA Time (ms)', 'Count', 
+                            'CPU Memory (bytes)', 'CUDA Memory (bytes)'])
+            
+            for evt in events:
+                # Get CPU time
+                cpu_time = 0
+                for attr in ['self_cpu_time_total', 'cpu_time_total', 'cpu_time']:
+                    if hasattr(evt, attr):
+                        val = getattr(evt, attr)
+                        if val is not None:
+                            cpu_time = val
+                            break
+                
+                # Get CUDA time
+                cuda_time = 0
+                for attr in ['self_cuda_time_total', 'cuda_time_total', 'cuda_time']:
+                    if hasattr(evt, attr):
+                        val = getattr(evt, attr)
+                        if val is not None:
+                            cuda_time = val
+                            break
+                
+                # Get count
+                count = getattr(evt, 'count', 1)
+                
+                # Get memory
+                cpu_mem = getattr(evt, 'cpu_memory_usage', 0)
+                cuda_mem = getattr(evt, 'cuda_memory_usage', 0)
+                
+                writer.writerow([
+                    evt.key,
+                    cpu_time / 1000,  # Convert to ms
+                    cuda_time / 1000,
+                    count,
+                    cpu_mem,
+                    cuda_mem
+                ])
+        
+        print(f"Operator statistics exported to {filename}_operator_stats.csv")
+        
+    except Exception as e:
+        print(f"Error exporting operator stats: {e}")
+
 def print_profiling_summary(prof):
     """Fixed profiling summary without total_average()"""
     print("\n" + "="*80)
