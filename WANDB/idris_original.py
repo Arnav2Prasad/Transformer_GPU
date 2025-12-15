@@ -3605,7 +3605,8 @@ else:
             
             # Log profiling metrics periodically
             if ProfilingConfig['active'] and iter % 100 == 0 and iter > 10:
-                print_profiling_stats(prof)
+                # print_profiling_stats(prof)
+                print_profiling_summary(prof)
             
             print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
 
