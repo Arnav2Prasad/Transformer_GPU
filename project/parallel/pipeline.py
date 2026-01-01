@@ -1,6 +1,9 @@
 
 
 
+import torch
+import torch.nn as nn
+
 
 class PipelineStage(nn.Module):
     def __init__(self, full_model, config, start_layer, end_layer, 
