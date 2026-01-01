@@ -1,6 +1,8 @@
 
 
 
+import torch
+
 
 # Common device configuration logic
 def setup_device_and_seeds(rank, local_rank):
