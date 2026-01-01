@@ -7,6 +7,8 @@ from data.loader import DataLoader
 from models.transformer.model import LLM
 
 import torch.distributed as dist
+import torch
+
 
 
 def get_lr(iter, TrainingConfig:Trainconfig):
