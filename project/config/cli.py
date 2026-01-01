@@ -1,5 +1,8 @@
 import argparse
 
+from config.defaults import TrainingConfig
+
+from config.defaults import ModelConfig
 
 
 def parse_args():
