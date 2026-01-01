@@ -2,6 +2,8 @@
 import torch
 import torch.nn as nn
 
+from config.model import LLMconfig
+
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
 

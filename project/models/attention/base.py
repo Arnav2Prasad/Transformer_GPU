@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+from config.model import LLMconfig
 
 
 class Attention(nn.Module):
