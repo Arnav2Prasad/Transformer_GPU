@@ -1,4 +1,6 @@
 
+import torch
+import torch.nn as nn
 
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
