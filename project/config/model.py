@@ -1,6 +1,9 @@
 
 
 
+from dataclasses import dataclass
+from typing import Literal, Optional, Dict, List, Tuple
+
 @dataclass
 class LLMconfig:
     # token params
