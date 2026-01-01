@@ -1,6 +1,15 @@
 
 
 
+
+import torch
+import torch.nn as nn
+
+from config.model import LLMconfig
+
+
+
+
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig, tp_group=None, enable_tp=True):
