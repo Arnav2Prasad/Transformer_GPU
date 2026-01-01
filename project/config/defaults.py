@@ -6,6 +6,8 @@
 from config.train import Trainconfig
 from config.model import LLMconfig
 
+import os
+
 
 TrainingConfig = Trainconfig(
     dataset='shakespeare',
