@@ -33,4 +33,7 @@ def compute_mfu_a40(
 
     mfu = achieved_flops_per_sec / peak_flops_per_sec
 
+
+
+
     return mfu * 100.0  # return percentage
