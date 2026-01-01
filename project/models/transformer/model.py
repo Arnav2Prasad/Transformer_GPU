@@ -1,5 +1,10 @@
 
 
+import torch
+import torch.nn as nn
+
+from config.model import LLMconfig
+
 
 class LLM(nn.Module):
     """ A simple Large Language Model """

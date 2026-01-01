@@ -1,4 +1,11 @@
 
+
+import torch
+import torch.nn as nn
+
+from config.model import LLMconfig
+
+
 class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.

@@ -1,6 +1,11 @@
 
 
 
+import torch
+import torch.nn as nn
+
+from config.model import LLMconfig
+
 class Expert(nn.Module):
     """ A single feed-forward network expert. """
     def __init__(self, config:LLMconfig):

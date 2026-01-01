@@ -1,4 +1,11 @@
 
+
+import torch
+import torch.nn as nn
+
+from config.model import LLMconfig
+
+
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
     def __init__(self, config: LLMconfig, tp_group=None):
