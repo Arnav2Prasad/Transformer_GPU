@@ -3,6 +3,9 @@
 
 # ____________PARAMS-CONFIG_________________
 
+from config.train import Trainconfig
+from config.model import LLMconfig
+
 
 TrainingConfig = Trainconfig(
     dataset='shakespeare',
