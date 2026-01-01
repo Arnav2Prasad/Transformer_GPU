@@ -64,9 +64,12 @@ from config.defaults import TrainingConfig
 from data.loader import DataLoader
 from data.utils import tokenize_and_save
 
-from logging.mfu import compute_mfu_a40
-from logging.profiler import create_profiler
-from logging.wandb import save_checkpoint_with_wandb
+
+from ar_logging.mfu import compute_mfu_a40
+
+
+from ar_logging.profiler import create_profiler
+from ar_logging.wandb import save_checkpoint_with_wandb
 
 
 from models.attention.base import Attention
