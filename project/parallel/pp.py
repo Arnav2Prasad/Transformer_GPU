@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.amp import autocast, GradScaler
+from ar_logging.profiler import create_profiler
+
 
 
 def chunked_cross_entropy(lm_head, hidden_states, targets, chunk_size=128):
