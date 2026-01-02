@@ -8,6 +8,7 @@ from config.model import LLMconfig
 from train import parallel_flag
 
 from models.moe.experts import Expert
+from parallel.ep import EPLayout
 
 
 class MoE(nn.Module):
