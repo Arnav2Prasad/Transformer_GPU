@@ -100,7 +100,7 @@ from parallel.zero_2 import ZeRO2GradientHandler , ZeRO2Optimizer
 from train import parallel_flag
 
 
-os.env['WANDB_API_KEY']=c78410b3a816898642987ae3c3899430080b89d1
+os.env['WANDB_API_KEY']='c78410b3a816898642987ae3c3899430080b89d1'
 
 warnings.filterwarnings("ignore")
 
