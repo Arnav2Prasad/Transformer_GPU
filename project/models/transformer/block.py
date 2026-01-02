@@ -6,6 +6,8 @@ import torch.nn as nn
 from config.model import LLMconfig
 
 from models.attention.base import Attention
+from train import parallel_flag
+
 
 class Block(nn.Module):
     """ A single Transformer block combining attention and MLP. """
