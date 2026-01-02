@@ -1,4 +1,4 @@
-parallel_flag = 5
+parallel_flag = 4
 print('parallel_flag : ', parallel_flag)
 
 
