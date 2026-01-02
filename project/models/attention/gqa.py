@@ -7,6 +7,9 @@ from config.model import LLMconfig
 from typing import Literal, Optional, Dict, List, Tuple
 
 from train import parallel_flag
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 class GQA(nn.Module):
