@@ -1,6 +1,7 @@
 
 
 import os
+from torch.profiler import profile, record_function, ProfilerActivity, schedule
 
 
 def create_profiler(output_dir="./profiler_logs", trace_handler=None):
