@@ -2,6 +2,8 @@
 
 
 import torch
+import torch.distributed as dist
+
 
 
 # Common device configuration logic
