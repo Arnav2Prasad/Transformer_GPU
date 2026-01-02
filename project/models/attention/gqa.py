@@ -6,6 +6,8 @@ from config.model import LLMconfig
 
 from typing import Literal, Optional, Dict, List, Tuple
 
+from train import parallel_flag
+
 
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
