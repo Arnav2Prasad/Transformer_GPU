@@ -1,7 +1,7 @@
 
 import requests
 import tiktoken
-
+import numpy as np
 
 # _______________ DATASET _________________
 def tokenize_and_save():
