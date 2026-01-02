@@ -5,7 +5,8 @@ import torch.nn as nn
 
 from config.model import LLMconfig
 from train import parallel_flag
-from block import Block
+
+from models.transformer.block import Block
 
 
 class LLM(nn.Module):
