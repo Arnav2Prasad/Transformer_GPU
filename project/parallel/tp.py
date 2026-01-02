@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-
+import os
 
 class ColumnParallelLinear(nn.Module):
     """Shard the weight matrix along output dimension (column-wise)"""
