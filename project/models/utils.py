@@ -9,6 +9,10 @@ from models.transformer.model import LLM
 import torch.distributed as dist
 import torch
 
+
+# Common dtype configuration
+dtype = 'float16' if not torch.cuda.is_bf16_supported else 'bfloat16'
+torch_dtype = getattr(torch, dtype)
 ctx = torch.amp.autocast(device_type="cuda", dtype=torch_dtype)
 
 
