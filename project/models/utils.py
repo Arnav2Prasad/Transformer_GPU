@@ -53,6 +53,7 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
 
 
 def cleanup():
+    master_process = rank == 0
     """Cleanup function for distributed training"""
     try:
         if torch.cuda.is_available():
