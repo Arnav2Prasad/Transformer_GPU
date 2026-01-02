@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 
 
+from parallel.pp import chunked_cross_entropy
+
 class PipelineStage(nn.Module):
     def __init__(self, full_model, config, start_layer, end_layer, 
                  is_first, is_last, rank):
