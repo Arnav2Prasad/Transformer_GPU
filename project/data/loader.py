@@ -2,7 +2,7 @@
 
 import torch
 from train import parallel_flag
-
+import numpy as np
 
 class DataLoader:
     def __init__(self, B, T, file_path, device, context_parallel_size=1, context_parallel_rank=0):
