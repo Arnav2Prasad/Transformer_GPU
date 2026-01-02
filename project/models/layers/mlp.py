@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from config.model import LLMconfig
 from train import parallel_flag
 
+from parallel.tp import _get_group_and_ranks , ColumnParallelLinear , RowParallelLinear
 
 
 
