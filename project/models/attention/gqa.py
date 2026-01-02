@@ -11,6 +11,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from parallel.utils import all_gather_sequence
+
 
 class GQA(nn.Module):
     """ Grouped-Query Attention with or without RoPE """
