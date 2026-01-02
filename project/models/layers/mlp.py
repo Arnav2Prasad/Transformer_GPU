@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from config.model import LLMconfig
+from train import parallel_flag
 
 
 
