@@ -8,6 +8,7 @@ from models.transformer.model import LLM
 
 import torch.distributed as dist
 import torch
+import math
 
 
 # Common dtype configuration
