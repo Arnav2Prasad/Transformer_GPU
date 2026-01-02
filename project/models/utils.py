@@ -9,6 +9,7 @@ from models.transformer.model import LLM
 import torch.distributed as dist
 import torch
 
+ctx = torch.amp.autocast(device_type="cuda", dtype=torch_dtype)
 
 
 def get_lr(iter, TrainingConfig:Trainconfig):
