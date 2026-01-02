@@ -1,5 +1,7 @@
 
 
+import os
+
 
 def create_profiler(output_dir="./profiler_logs", trace_handler=None):
     """
