@@ -1,4 +1,7 @@
 
+import requests
+
+
 # _______________ DATASET _________________
 def tokenize_and_save():
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
