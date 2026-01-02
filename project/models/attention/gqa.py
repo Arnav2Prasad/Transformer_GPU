@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from parallel.utils import all_gather_sequence
 
-from parallel.tp import _get_group_and_ranks
+from parallel.tp import _get_group_and_ranks , ColumnParallelLinear , RowParallelLinear
 
 
 class GQA(nn.Module):
