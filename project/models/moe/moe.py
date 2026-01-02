@@ -8,6 +8,7 @@ from train import parallel_flag
 
 from models.moe.experts import Expert
 
+
 class MoE(nn.Module):
     '''
     This class implements the DeepSeekMoE layer, featuring shared and routed experts.

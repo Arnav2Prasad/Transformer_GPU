@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from config.model import LLMconfig
+from models.layers.mlp import MLP
 
 class Expert(nn.Module):
     """ A single feed-forward network expert. """
