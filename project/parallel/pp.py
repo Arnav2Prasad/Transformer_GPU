@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.amp import autocast, GradScaler
 from ar_logging.profiler import create_profiler
+from torch.profiler import profile, record_function, ProfilerActivity, schedule
 
 
 
