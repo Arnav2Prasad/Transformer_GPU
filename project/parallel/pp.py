@@ -1,5 +1,8 @@
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 def chunked_cross_entropy(lm_head, hidden_states, targets, chunk_size=128):
