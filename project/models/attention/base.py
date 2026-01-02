@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from config.model import LLMconfig
 
+from models.attention.gqa import GQA
+
 
 class Attention(nn.Module):
     """ Routes the attention mechanism according to the config"""
