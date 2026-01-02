@@ -9,6 +9,7 @@ from ar_logging.profiler import create_profiler
 from torch.profiler import profile, record_function, ProfilerActivity, schedule
 
 
+from ar_logging.mfu import compute_mfu_a40
 
 def chunked_cross_entropy(lm_head, hidden_states, targets, chunk_size=128):
     logits_flat = hidden_states.view(-1, hidden_states.size(-1))
