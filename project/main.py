@@ -140,6 +140,9 @@ if parallel_flag == -1:
     rank = int(os.environ['RANK'])
     local_rank = int(os.environ['LOCAL_RANK'])
 
+    world_size = int(os.environ['WORLD_SIZE'])
+    ddp_world_size = world_size
+
     master_process = rank==0
     torch.manual_seed(1729)
     torch.cuda.manual_seed(1729)
