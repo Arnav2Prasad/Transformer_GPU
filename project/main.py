@@ -136,10 +136,18 @@ init_process_group(backend='nccl')
 
 
 
+if parallel_flag == -1:
+    torch.manual_seed(1729)
+    torch.cuda.manual_seed(1729)
+    torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
 
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device_type = 'cuda' if 'cuda' in device else 'cpu'
+    dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+    ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype))
+    scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' else nullcontext()
 
-# Handle parallel_flag configurations
-if parallel_flag in [4, 8]:
+elif parallel_flag in [4, 8]:
     # Sequence Parallel or Context Parallel
     rank = int(os.environ['RANK'])
     local_rank = int(os.environ['LOCAL_RANK'])
@@ -206,6 +214,11 @@ else:
     world_size = ddp_world_size
     device = f"cuda:{ddp_local_rank}"
     master_process = check_and_print_master(ddp_rank, ddp_world_size, "DDP")
+
+
+
+
+
 
 # Common dtype configuration
 dtype = 'float16' if not torch.cuda.is_bf16_supported else 'bfloat16'
@@ -356,6 +369,9 @@ total_batch_size = TrainingConfig.total_batch_size
 B = TrainingConfig.batch_size    # microbatch size
 T = ModelConfig.block_size       # sequence length
 
+
+grad_accum_steps = 0
+
 if parallel_flag == 7:
     # Pipeline parallelism handles batching via chunks, no grad accumulation
     grad_accum_steps = 1
@@ -365,6 +381,9 @@ elif parallel_flag == 6 or parallel_flag == 5:
 elif parallel_flag == 4 or parallel_flag == 8:
     assert total_batch_size % (B * T *world_size) == 0, "make sure total_batch_size is divisible by B * T * world_size"
     grad_accum_steps = total_batch_size // (B * T *world_size)
+elif parallel_flag == -1:
+    assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+    grad_accum_steps = total_batch_size // (B * T)
 else:
     assert total_batch_size % (B * T *ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
     grad_accum_steps = total_batch_size // (B * T *ddp_world_size)

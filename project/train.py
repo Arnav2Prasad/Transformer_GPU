@@ -1,7 +1,8 @@
-parallel_flag = 1
+parallel_flag = -1
 print('parallel_flag : ', parallel_flag)
 
 
+# -1 for nothing (No parallel)
 # 1 for plain DP
 #  2 for zero1
 #  3 for zero1 and 2
