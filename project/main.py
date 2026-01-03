@@ -137,6 +137,10 @@ init_process_group(backend='nccl')
 
 
 if parallel_flag == -1:
+    rank = int(os.environ['RANK'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+
+    master_process = rank==0
     torch.manual_seed(1729)
     torch.cuda.manual_seed(1729)
     torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
