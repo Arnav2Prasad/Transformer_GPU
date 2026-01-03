@@ -621,10 +621,13 @@ else:
     if parallel_flag == 5 or parallel_flag == 6:
         raw_model:LLM = model
     else:
-        raw_model:LLM = model.module
+        if parallel_flag != -1:
+            raw_model:LLM = model.module
 
-
-    optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
+    if parallel_flag == -1:
+        optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
+    else:
+        optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
 
 
 
