@@ -70,7 +70,7 @@ def parse_args():
                        help='Disable wandb logging')
 
     parser.add_argument(
-        '--parallel',
+        '--parallel_flag',
         dest='parallel_flag',
         action='store_true',
         default=-1,
