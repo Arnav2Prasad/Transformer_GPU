@@ -53,7 +53,6 @@ from torch.profiler import profile, record_function, ProfilerActivity, schedule
 import torch._dynamo
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import ModuleWrapPolicy
-from torch.distributed.fsdp import MixedPrecision,
 
 
 
