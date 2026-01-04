@@ -61,7 +61,6 @@ class LLMconfig:
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
-        ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
 
         # H below is either the number of total query heads(nh)
         # hs is the embedding dimension for the query/key, given by n_embd//nh
@@ -83,7 +82,7 @@ class LLMconfig:
     '''
     @staticmethod
     def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-        ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
+        # ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
         
         B, T, H, _ = x.size()
         
