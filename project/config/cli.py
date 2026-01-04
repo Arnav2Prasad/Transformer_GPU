@@ -72,7 +72,6 @@ def parse_args():
     parser.add_argument(
         '--parallel_flag',
         dest='parallel_flag',
-        action='store_true',
         default=-1,
         help='Enable parallel execution'
     )
