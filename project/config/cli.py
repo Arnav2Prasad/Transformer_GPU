@@ -4,6 +4,9 @@ from config.defaults import TrainingConfig
 
 from config.defaults import ModelConfig
 
+from train import parallel_flag
+
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
@@ -65,6 +68,14 @@ def parse_args():
                        help='Tags for WandB run')
     parser.add_argument('--no_wandb', action='store_true', 
                        help='Disable wandb logging')
+
+    parser.add_argument(
+        '--parallel',
+        dest='parallel_flag',
+        action='store_true',
+        default=-1,
+        help='Enable parallel execution'
+    )
 
 
 

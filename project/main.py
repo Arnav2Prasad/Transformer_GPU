@@ -290,8 +290,11 @@ TrainingConfig.no_wandb = args.no_wandb
 
 
 
-
-
+print('=============')
+print('parallel_flag - ', parallel_flag)
+print('parallel_flag - ', parallel_flag)
+print('parallel_flag - ', parallel_flag)
+print('=============')
 
 if parallel_flag==5:
     # Add TP config to ModelConfig
