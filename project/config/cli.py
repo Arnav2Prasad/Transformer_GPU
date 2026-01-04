@@ -4,9 +4,8 @@ from config.defaults import TrainingConfig
 
 from config.defaults import ModelConfig
 
-from train import parallel_flag
 
-
+parallel_flag = -1
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')

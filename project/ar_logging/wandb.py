@@ -1,5 +1,7 @@
 
 
+from config.cli import parallel_flag
+
 
 def save_checkpoint_with_wandb(model, optimizer, iter, loss, config, use_wandb, rank=0):
     """Save checkpoint and optionally log as WandB artifact"""

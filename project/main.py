@@ -97,7 +97,8 @@ from parallel.utils import setup_device_and_seeds ,check_and_print_master , broa
 from parallel.zero_2 import ZeRO2GradientHandler , ZeRO2Optimizer
 
 
-from train import parallel_flag
+# from train import parallel_flag
+from config.cli import parallel_flag
 
 
 os.environ['WANDB_API_KEY']='c78410b3a816898642987ae3c3899430080b89d1'
