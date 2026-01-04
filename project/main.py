@@ -423,6 +423,14 @@ if parallel_flag == 4:
 
 
 
+
+
+
+
+
+
+
+
 if parallel_flag==5:
     model = LLM(ModelConfig , tp_group=tp_group).to(device)
 else:
