@@ -5,7 +5,6 @@ from config.defaults import TrainingConfig
 from config.defaults import ModelConfig
 
 
-parallel_flag = -1
 
 def parse_args():
 
@@ -71,18 +70,7 @@ def parse_args():
     parser.add_argument('--no_wandb', action='store_true', 
                        help='Disable wandb logging')
 
-    # parser.add_argument(
-    #     '--parallel_flag',
-    #     dest='parallel_flag',
-    #     default=-1,
-    #     help='Enable parallel execution'
-    # )
-    parser.add_argument(
-        '--parallel_flag',
-        type=int,  # Add type=int
-        default=-1,
-        help='Enable parallel execution'
-    )
+    
 
 
 
