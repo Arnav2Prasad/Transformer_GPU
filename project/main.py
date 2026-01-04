@@ -457,6 +457,7 @@ elif parallel_flag == 4:
     #     sync_module_states=True,
     # )
     # Wrap FSDP creation with dynamo disabled
+    '''
     with torch._dynamo.disable():
         model = FSDP(
             model,
@@ -468,7 +469,25 @@ elif parallel_flag == 4:
             use_orig_params=True,
             sync_module_states=True,
         )
+    '''
 
+    # Ensure all buffers have the correct dtype BEFORE FSDP
+    if torch_dtype is not None:
+        for name, buffer in model.named_buffers():
+            if buffer.dtype != torch_dtype:
+                buffer.data = buffer.to(dtype=torch_dtype)
+
+    # Now wrap with FSDP
+    model = FSDP(
+        model,
+        auto_wrap_policy=fsdp_wrap_policy,
+        mixed_precision=mp_policy,
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        device_id=torch.cuda.current_device(),
+        limit_all_gathers=True,
+        use_orig_params=True,
+        sync_module_states=True,
+    )
 
 
 
