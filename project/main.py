@@ -280,6 +280,9 @@ for key, value in vars(args).items():
             setattr(ModelConfig, key, value)
 
 
+
+
+
 # Add WandB args to TrainingConfig
 TrainingConfig.wandb_project = args.wandb_project
 TrainingConfig.wandb_entity = args.wandb_entity
