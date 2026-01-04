@@ -50,7 +50,10 @@ from torch.profiler import profile, record_function, ProfilerActivity, schedule
 
 
 
-
+import torch._dynamo
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.wrap import ModuleWrapPolicy
+from torch.distributed.fsdp import MixedPrecision,
 
 
 
@@ -443,17 +446,30 @@ elif parallel_flag == 8:
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 elif parallel_flag == 4:
-    model = FSDP(
-        model,
-        auto_wrap_policy=fsdp_wrap_policy,
-        mixed_precision=mp_policy,
-        sharding_strategy=ShardingStrategy.FULL_SHARD, # This is ZeRO-3
-        device_id=torch.cuda.current_device(),
-        # cpu_offload=CPUOffload(offload_params=True), # Optional: to save even more GPU memory
-        limit_all_gathers=True, # Recommended for performance
-        use_orig_params=True, # Important for optimizers like AdamW and for getting original parameters
-        sync_module_states=True,
-    )
+    # model = FSDP(
+    #     model,
+    #     auto_wrap_policy=fsdp_wrap_policy,
+    #     mixed_precision=mp_policy,
+    #     sharding_strategy=ShardingStrategy.FULL_SHARD, # This is ZeRO-3
+    #     device_id=torch.cuda.current_device(),
+    #     # cpu_offload=CPUOffload(offload_params=True), # Optional: to save even more GPU memory
+    #     limit_all_gathers=True, # Recommended for performance
+    #     use_orig_params=True, # Important for optimizers like AdamW and for getting original parameters
+    #     sync_module_states=True,
+    # )
+    # Wrap FSDP creation with dynamo disabled
+    with torch._dynamo.disable():
+        model = FSDP(
+            model,
+            auto_wrap_policy=fsdp_wrap_policy,
+            mixed_precision=mp_policy,
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            device_id=torch.cuda.current_device(),
+            limit_all_gathers=True,
+            use_orig_params=True,
+            sync_module_states=True,
+        )
+
 
 
 
