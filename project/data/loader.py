@@ -1,7 +1,7 @@
 
 
 import torch
-from train import parallel_flag
+from config.cli import parallel_flag
 import numpy as np
 
 class DataLoader:

@@ -6,7 +6,7 @@ import torch.nn as nn
 from config.model import LLMconfig
 
 from models.attention.base import Attention
-from train import parallel_flag
+from config.cli import parallel_flag
 from models.moe.moe import MoE
 
 class Block(nn.Module):

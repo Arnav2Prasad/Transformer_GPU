@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from config.model import LLMconfig
-from train import parallel_flag
+from config.cli import parallel_flag
 
 from models.moe.experts import Expert
 from parallel.ep import EPLayout

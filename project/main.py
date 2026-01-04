@@ -97,7 +97,10 @@ from parallel.utils import setup_device_and_seeds ,check_and_print_master , broa
 from parallel.zero_2 import ZeRO2GradientHandler , ZeRO2Optimizer
 
 
-from train import parallel_flag
+# from train import parallel_flag
+from config.cli import parallel_flag
+
+
 
 
 os.environ['WANDB_API_KEY']='c78410b3a816898642987ae3c3899430080b89d1'
@@ -293,8 +296,11 @@ TrainingConfig.no_wandb = args.no_wandb
 
 
 
-
-
+print('=============')
+print('parallel_flag - ', parallel_flag)
+print('parallel_flag - ', parallel_flag)
+print('parallel_flag - ', parallel_flag)
+print('=============')
 
 if parallel_flag==5:
     # Add TP config to ModelConfig
