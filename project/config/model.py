@@ -57,10 +57,11 @@ class LLMconfig:
     ep_rank: int = 0
     ep_group: any = None
 
-    '''
+    
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
+        # ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
 
         # H below is either the number of total query heads(nh)
         # hs is the embedding dimension for the query/key, given by n_embd//nh
@@ -78,45 +79,4 @@ class LLMconfig:
 
         return x_out.type_as(x)
 
-
-    '''
-    @staticmethod
-    def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-        # ''' Applies RoPE to either the query or the key whose embeddings are to be rotated two at a time.'''
         
-        B, T, H, _ = x.size()
-        
-        # Convert to float32 for RoPE calculations if needed
-        original_dtype = x.dtype
-        if original_dtype == torch.bfloat16:
-            x = x.float()
-            if torch.is_complex(freqs_cis):
-                freqs_cis = freqs_cis.float()
-        
-        # Reshape: (B, T, H, hs) -> (B, T, H, hs//2, 2)
-        x_ = x.reshape(B, T, H, -1, 2)
-        x_re, x_im = x_.unbind(-1)
-        
-        # Ensure freqs_cis has correct shape: (1, T, 1, hs//2)
-        freqs_cis = freqs_cis.view(1, T, 1, -1)
-        
-        # Extract cos and sin from complex tensor
-        if torch.is_complex(freqs_cis):
-            cos_theta = freqs_cis.real
-            sin_theta = freqs_cis.imag
-        else:
-            # If freqs_cis is already [cos, sin] concatenated
-            cos_theta, sin_theta = freqs_cis.chunk(2, dim=-1)
-        
-        # Apply rotation using real operations
-        x_re_out = x_re * cos_theta - x_im * sin_theta
-        x_im_out = x_re * sin_theta + x_im * cos_theta
-        
-        # Stack back: (B, T, H, hs//2, 2) -> (B, T, H, hs)
-        x_out = torch.stack([x_re_out, x_im_out], dim=-1).flatten(3)
-        
-        # Convert back to original dtype
-        if original_dtype == torch.bfloat16:
-            x_out = x_out.to(original_dtype)
-        
-        return x_out

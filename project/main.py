@@ -479,11 +479,7 @@ elif parallel_flag == 4:
         )
     '''
 
-    # Ensure all buffers have the correct dtype BEFORE FSDP
-    if torch_dtype is not None:
-        for name, buffer in model.named_buffers():
-            if buffer.dtype != torch_dtype:
-                buffer.data = buffer.to(dtype=torch_dtype)
+  
 
     # Now wrap with FSDP
     model = FSDP(
