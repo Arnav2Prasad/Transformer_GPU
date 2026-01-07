@@ -867,6 +867,7 @@ else:
                 model_cfg=ModelConfig,
                 training_cfg=TrainingConfig,
                 n_gpus=world_size,               # or dist.get_world_size()
+                grad_accum_steps = grad_accum_steps,
                 peak_tflops_per_gpu=65.0,        # CHANGE based on your GPU!
                 include_attention=True,
             )
