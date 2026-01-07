@@ -305,6 +305,8 @@ def compute_mfu_from_configs(
 
     # Peak FLOPs/s across all GPUs
     flops_peak_per_sec = float(peak_tflops_per_gpu) * 1e12 * int(n_gpus)
+    print('flops_peak_per_sec->',flops_peak_per_sec)
 
     mfu = flops_achieved_per_sec / flops_peak_per_sec
+    print('mfu->',mfu)
     return mfu * 100.0
