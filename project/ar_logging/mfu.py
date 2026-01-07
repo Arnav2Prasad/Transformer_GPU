@@ -325,9 +325,10 @@ def arnav_compute_mfu_from_configs(
     model_cfg,
     training_cfg,
     n_gpus: int,
+    grad_accum_steps: int,
     peak_tflops_per_gpu: float,
     include_attention: bool = True,
-    grad_accum_steps: int,
+    
 ):
     """
     Compute Model FLOPs Utilization (MFU) as a percentage.
@@ -370,7 +371,7 @@ def arnav_compute_mfu_from_configs(
     flops_per_fwdbwd = flops_per_token * T
 
     # Account for gradient accumulation
-    flops_per_iter = flops_per_fwdbwd * training_cfg.grad_accum_steps
+    flops_per_iter = flops_per_fwdbwd * grad_accum_steps
 
     # Achieved FLOPs/sec
     flops_achieved = flops_per_iter / dt
