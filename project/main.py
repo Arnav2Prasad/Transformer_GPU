@@ -862,7 +862,7 @@ else:
 
             # print(f"MFU: {mfu_pct:.2f}%")
             # mfu = mfu_pct
-            n_gpus = 2
+            n_gpus = 4
 
             mfu_pct = arnav_compute_mfu_from_configs(
                 dt_ms=dt,
@@ -874,6 +874,8 @@ else:
                 peak_tflops_per_gpu=149.7,        # CHANGE based on your GPU!
                 include_attention=True,
             )
+
+            
 
             running_mfu = (
                 mfu_pct if running_mfu < 0
