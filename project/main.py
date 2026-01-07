@@ -878,6 +878,8 @@ else:
                 else 0.9 * running_mfu + 0.1 * mfu_pct
             )
 
+            mfu = mfu_pct
+
             print(
                 # f"iter {iter_num}: "
                 # f"loss {lossf:.4f}, "
