@@ -258,6 +258,9 @@ def compute_mfu_from_configs(
     if n_params_active <= 0:
         raise ValueError("n_params_active must be > 0")
 
+
+    dt_s = dt_ms / 1000.0
+
     # ---- Pull model dimensions from config ----
     T = int(_require_attr(model_cfg, "block_size"))   # seq length / block size
     L = int(_require_attr(model_cfg, "n_layer"))
