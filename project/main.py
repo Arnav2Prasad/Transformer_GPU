@@ -844,23 +844,44 @@ else:
             # mfu = mfu_pct
 
 
-            n_gpus = 1
-            print("active->", active)
+            # n_gpus = 1
+            # print("active->", active)
 
-            mfu_pct = arnav_compute_mfu_from_configs(
-                dt_ms=dt,
-                n_params_active=active,
+            # mfu_pct = arnav_compute_mfu_from_configs(
+            #     dt_ms=dt,
+            #     n_params_active=active,
+            #     model_cfg=ModelConfig,
+            #     training_cfg=TrainingConfig,
+            #     n_gpus=n_gpus,
+            #     grad_accum_steps=grad_accum_steps,
+            #     peak_tflops_per_gpu=65.0,  # e.g. T4 ≈ 65 TFLOPS (fp16)
+            #     include_attention=True,
+                
+            # )
+
+            # print(f"MFU: {mfu_pct:.2f}%")
+            # mfu = mfu_pct
+            mfu_pct = compute_mfu_from_configs(
+                dt_ms=dt_ms,
+                n_params_active=active,          # 23,516,672
                 model_cfg=ModelConfig,
                 training_cfg=TrainingConfig,
-                n_gpus=n_gpus,
-                grad_accum_steps=grad_accum_steps,
-                peak_tflops_per_gpu=65.0,  # e.g. T4 ≈ 65 TFLOPS (fp16)
+                n_gpus=world_size,               # or dist.get_world_size()
+                peak_tflops_per_gpu=65.0,        # CHANGE based on your GPU!
                 include_attention=True,
-                
             )
 
-            print(f"MFU: {mfu_pct:.2f}%")
-            mfu = mfu_pct
+            running_mfu = (
+                mfu_pct if running_mfu < 0
+                else 0.9 * running_mfu + 0.1 * mfu_pct
+            )
+
+            print(
+                f"iter {iter_num}: "
+                f"loss {lossf:.4f}, "
+                f"time {dt_ms:.2f}ms, "
+                f"mfu {running_mfu:.2f}%"
+            )
 
 
 
