@@ -839,6 +839,7 @@ else:
                 include_attention=True,
             )
             print(f"MFU: {mfu_pct:.2f}%")
+            mfu = mfu_pct
 
 
             # print(
