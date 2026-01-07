@@ -319,6 +319,8 @@ def compute_mfu_from_configs(
 
 
 
+
+
 def arnav_compute_mfu_from_configs(
     dt_ms: float,
     n_params_active: int,

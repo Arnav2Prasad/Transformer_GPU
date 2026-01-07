@@ -848,7 +848,7 @@ else:
             print("active->", active)
 
             mfu_pct = arnav_compute_mfu_from_configs(
-                dt=dt,
+                dt_ms=dt,
                 n_params_active=active,
                 model_cfg=ModelConfig,
                 training_cfg=TrainingConfig,
