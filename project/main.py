@@ -732,21 +732,10 @@ else:
     # )
 
     # Corrected profile() call:
-    prof = profile(
-        activities=activities,
-        schedule=schedule(
-            wait=1,       # Skip first iteration (warmup)
-            warmup=2,     # Warmup for 2 iterations
-            active=4,     # Profile for 4 iterations
-            repeat=1      # Repeat the cycle once
-        ),
-        on_trace_ready=trace_handler,
-        record_shapes=enable_shape_record,
-        profile_memory=enable_memory,
-        with_stack=enable_stack_trace,
-        with_flops=enable_flops,
-        with_modules=True,      # Keep this one if your PyTorch version supports it
-        # REMOVE THIS LINE: with_threads=True,
+    prof = create_profiler(
+        output_dir="./my_profiler_logs",
+        device="cuda",
+        enable_memory=True
     )
 
 
