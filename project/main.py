@@ -844,7 +844,7 @@ else:
             # mfu = mfu_pct
 
 
-            n_gpus = 2
+            n_gpus = 1
             print("active->", active)
 
             mfu_pct = arnav_compute_mfu_from_configs(
