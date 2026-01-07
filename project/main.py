@@ -723,12 +723,30 @@ else:
 
 
     # Create enhanced profiler
-    prof = create_profiler(
-        output_dir="./llama_profiler_logs",
-        enable_memory=True,      # Enable for detailed memory analysis
-        enable_stack_trace=True, # Enable for debugging
-        enable_flops=True,       # Enable for performance analysis
-        device=device
+    # prof = create_profiler(
+    #     output_dir="./llama_profiler_logs",
+    #     enable_memory=True,      # Enable for detailed memory analysis
+    #     enable_stack_trace=True, # Enable for debugging
+    #     enable_flops=True,       # Enable for performance analysis
+    #     device=device
+    # )
+
+    # Corrected profile() call:
+    prof = profile(
+        activities=activities,
+        schedule=schedule(
+            wait=1,       # Skip first iteration (warmup)
+            warmup=2,     # Warmup for 2 iterations
+            active=4,     # Profile for 4 iterations
+            repeat=1      # Repeat the cycle once
+        ),
+        on_trace_ready=trace_handler,
+        record_shapes=enable_shape_record,
+        profile_memory=enable_memory,
+        with_stack=enable_stack_trace,
+        with_flops=enable_flops,
+        with_modules=True,      # Keep this one if your PyTorch version supports it
+        # REMOVE THIS LINE: with_threads=True,
     )
 
 
