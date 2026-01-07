@@ -502,6 +502,7 @@ elif parallel_flag == 4:
 if master_process : print("Using compiled model")
 model = torch.compile(model)
 
+running_mfu = -1.0
 
 if parallel_flag == 6:
     os.environ.setdefault('NCCL_ASYNC_ERROR_HANDLING', '1')
