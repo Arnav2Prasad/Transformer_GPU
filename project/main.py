@@ -817,16 +817,28 @@ else:
             tokens_per_iter = B * T * grad_accum_steps * ddp_world_size
             tokens_per_sec = tokens_per_iter / (dt / 1000.0)
 
-            mfu = compute_mfu_a40(
-                tokens_per_sec=tokens_per_sec,
-                n_params=total,
-                n_layers=ModelConfig.n_layer,
-                n_heads=ModelConfig.n_head,
-                head_dim=ModelConfig.n_embd // ModelConfig.n_head,
-                seq_len=T,
-                n_gpus=ddp_world_size,
+            # mfu = compute_mfu_a40(
+            #     tokens_per_sec=tokens_per_sec,
+            #     n_params=total,
+            #     n_layers=ModelConfig.n_layer,
+            #     n_heads=ModelConfig.n_head,
+            #     head_dim=ModelConfig.n_embd // ModelConfig.n_head,
+            #     seq_len=T,
+            #     n_gpus=ddp_world_size,
+            #     include_attention=True,
+            # )
+            n_gpus = 2
+            mfu_pct = compute_mfu_from_configs(
+                dt=dt,
+                n_params_active=n_params_active,
+                model_cfg=ModelConfig,
+                training_cfg=TrainingConfig,
+                n_gpus=n_gpus,
+                peak_tflops_per_gpu=65.0,   # pass this from wherever you keep HW constants
                 include_attention=True,
             )
+            print(f"MFU: {mfu_pct:.2f}%")
+
 
             # print(
             #     f"step: {iter} | "
