@@ -807,11 +807,8 @@ else:
                 print("✅ Profiling complete! Check ./profiler_logs/ for traces")
                 profiler_enabled = False  # Disable after profiling    
 
-        # if master_process:
-        #     torch.cuda.synchronize()
-        #     mem = torch.cuda.memory_reserved()
-        #     dt = (perf_counter() - t0) * 1000
-        #     print(f"step: {iter} | train loss:{loss.item()*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+        
+        
         if master_process:
             torch.cuda.synchronize()
             mem = torch.cuda.memory_reserved()
@@ -941,17 +938,11 @@ if use_wandb and master_process:
     wandb.finish()
     print("WandB run completed")
 
-def analyze_profiler_trace(trace_file):
-    """
-    Load and analyze a profiler trace file
-    """
-    import json
-    
-    with open(trace_file, 'r') as f:
-        trace = json.load(f)
-    
-    print(f"Analyzing trace: {trace_file}")
-    print(f"Total events: {len(trace.get('traceEvents', []))}")
+
+
+
+
+
 
 # To view traces:
 # 1. Open Chrome browser
