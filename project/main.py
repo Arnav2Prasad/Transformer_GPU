@@ -194,6 +194,7 @@ elif parallel_flag == 5:
 elif parallel_flag in [1, 2, 3]:
     # DDP with different ZeRO configurations
     ddp_rank = int(os.environ['RANK'])
+    rank = ddp_rank
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
     
     ddp_world_size = int(os.environ['WORLD_SIZE'])
@@ -225,6 +226,8 @@ else:
     ddp_rank = int(os.environ['RANK'])
     ddp_local_rank = int(os.environ['LOCAL_RANK'])
     ddp_world_size = int(os.environ['WORLD_SIZE'])
+
+    rank = ddp_rank
     world_size = ddp_world_size
     device = f"cuda:{ddp_local_rank}"
     master_process = check_and_print_master(ddp_rank, ddp_world_size, "DDP")
