@@ -218,6 +218,11 @@ def compute_grad_accum_steps(training_cfg: Any, model_cfg: Any, n_gpus: int) -> 
     return total_batch_tokens // tokens_per_micro_step_global
 
 
+
+
+
+
+
 def compute_mfu_from_configs(
     *,
     dt: float,
@@ -259,16 +264,26 @@ def compute_mfu_from_configs(
     H = int(_require_attr(model_cfg, "n_head"))
     n_embd = int(_require_attr(model_cfg, "n_embd"))
 
+    print('T->',T)
+    print('L->',L)
+    print('H->',H)
+    print('n_embd->',n_embd)
+
     if n_embd % H != 0:
         raise ValueError(f"n_embd must be divisible by n_head. Got n_embd={n_embd}, n_head={H}")
     Q = n_embd // H  # head_dim
 
+    print('Q->',Q)
+
     # ---- Derive grad accumulation from configs (global tokens per optimizer step) ----
     micro_seq_per_gpu = int(_require_attr(training_cfg, "batch_size"))
+    print('micro_seq_per_gpu->',micro_seq_per_gpu)
     grad_accum_steps = compute_grad_accum_steps(training_cfg, model_cfg, n_gpus)
+    print('grad_accum_steps->',grad_accum_steps)
 
     # How many sequences are processed per optimizer step (GLOBAL, across GPUs)
     sequences_per_iter_global = micro_seq_per_gpu * n_gpus * grad_accum_steps
+    print('sequences_per_iter_global->',sequences_per_iter_global)
 
     # ---- FLOPs accounting (PaLM/nanoGPT style) ----
     # FLOPs per token (training) ≈ 6N + 12 L H Q T
@@ -278,12 +293,15 @@ def compute_mfu_from_configs(
 
     # Convert per-token -> per-(fwd+bwd) over a full sequence of length T
     flops_per_fwd_bwd = flops_per_token * float(T)
+    print('flops_per_fwd_bwd->',flops_per_fwd_bwd)
 
     # Per optimizer iteration
     flops_per_iter = flops_per_fwd_bwd * float(sequences_per_iter_global)
+    print('flops_per_iter->',flops_per_iter)
 
     # Achieved FLOPs/s
     flops_achieved_per_sec = flops_per_iter / float(dt)
+    print('flops_achieved_per_sec->',flops_achieved_per_sec)
 
     # Peak FLOPs/s across all GPUs
     flops_peak_per_sec = float(peak_tflops_per_gpu) * 1e12 * int(n_gpus)

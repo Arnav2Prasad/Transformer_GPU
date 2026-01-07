@@ -829,6 +829,7 @@ else:
             #     include_attention=True,
             # )
             n_gpus = 2
+            print('active->', active)
             mfu_pct = compute_mfu_from_configs(
                 dt=dt,
                 n_params_active=active,
