@@ -30,16 +30,17 @@ ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
     block_size = 2**10,
-    n_embd = 256, 
+    # n_embd = 256, 
+    n_embd = 768, 
     pos_emb = 'rope',
     
     # MoE
     moe = True,
 
-    up_dim = 512, 
+    up_dim = 1024, 
     non_linearity = 'swiglu',  
     dropout=0.0,
-    n_layer = 6,
+    n_layer = 12,
 
     n_exp = 8,
     n_shared = 1,
