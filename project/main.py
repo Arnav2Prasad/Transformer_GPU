@@ -702,6 +702,15 @@ else:
     profiler_enabled = True  # Set to False to disable profiling
     profiler_start_iter = 10  # Start profiling after N iterations
     profiler_duration = 10    # Profile for N iterations
+    profiler_total_steps = 4   # total profiler steps (must match schedule)
+
+
+    prof = None
+    if profiler_enabled:
+        prof = create_profiler(
+            output_dir="./profiler_logs",
+            rank=rank,   # IMPORTANT: pass rank
+        )
 
 
 
@@ -722,236 +731,231 @@ else:
 
 
 
-    # Create enhanced profiler
-    # prof = create_profiler(
-    #     output_dir="./llama_profiler_logs",
-    #     enable_memory=True,      # Enable for detailed memory analysis
-    #     enable_stack_trace=True, # Enable for debugging
-    #     enable_flops=True,       # Enable for performance analysis
-    #     device=device
-    # )
-
-    # Corrected profile() call:
-    prof = create_profiler(
-        output_dir="./my_profiler_logs",
-        device="cuda",
-        enable_memory=True
-    )
 
 
 
     
+    with prof if profiler_enabled else nullcontext():
 
-    for iter in range(TrainingConfig.max_iters + 1):
-        t0 = perf_counter()
+        for iter in range(TrainingConfig.max_iters + 1):
+            t0 = perf_counter()
 
-        lr = get_lr(iter, TrainingConfig) 
-        for param_grp in optimizer.param_groups:
-            param_grp['lr'] = lr
-        
-        optimizer.zero_grad(set_to_none=True)
-
-        a, b = 0, 0
-        if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
-            with record_function("validation"):  # Profile validation
-                a = perf_counter()
-                losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-                b = perf_counter()
-                if master_process:
-                    print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
-                t0 = b
-
-        if parallel_flag in [5, 6]:
+            lr = get_lr(iter, TrainingConfig) 
+            for param_grp in optimizer.param_groups:
+                param_grp['lr'] = lr
+            
             optimizer.zero_grad(set_to_none=True)
 
-        # Gradient accumulation loop
-        if parallel_flag == 6:
-            for micro_step in range(grad_accum_steps):
-                with record_function(f"microstep_{micro_step}"):  # Profile each microstep
-                    
-                    with record_function("data_loading"):
-                        if master_process:
-                            x, y = train_loader.next_batch()
-                        else:
-                            x = torch.empty(B, T, dtype=torch.long, device=device)
-                            y = torch.empty(B, T, dtype=torch.long, device=device)
+            a, b = 0, 0
+            if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter != 0:
+                with record_function("validation"):  # Profile validation
+                    a = perf_counter()
+                    losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
+                    b = perf_counter()
+                    if master_process:
+                        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+                    t0 = b
+
+            if parallel_flag in [5, 6]:
+                optimizer.zero_grad(set_to_none=True)
+
+            # Gradient accumulation loop
+            if parallel_flag == 6:
+                for micro_step in range(grad_accum_steps):
+                    with record_function(f"microstep_{micro_step}"):  # Profile each microstep
                         
-                        x, y = broadcast_batch(x, y, src=0)
-                    
-                    with record_function("forward_pass"):
-                        with torch.cuda.amp.autocast(dtype=torch_dtype):
-                            _, loss, _ = model(x, y)
-                            loss = loss / grad_accum_steps
-                    
-                    with record_function("backward_pass"):
-                        scaler.scale(loss).backward()
-        
-        elif parallel_flag == 5:
-            for micro_step in range(grad_accum_steps):
-                with record_function(f"microstep_{micro_step}"):
-                    
-                    with record_function("data_loading"):
-                        if master_process:
-                            x, y = train_loader.next_batch()
-                        else:
-                            x = torch.empty(B, T, dtype=torch.long, device=device)
-                            y = torch.empty(B, T, dtype=torch.long, device=device)
+                        with record_function("data_loading"):
+                            if master_process:
+                                x, y = train_loader.next_batch()
+                            else:
+                                x = torch.empty(B, T, dtype=torch.long, device=device)
+                                y = torch.empty(B, T, dtype=torch.long, device=device)
+                            
+                            x, y = broadcast_batch(x, y, src=0)
                         
-                        x, y = broadcast_batch(x, y, src=0)
-                    
-                    with record_function("forward_pass"):
-                        with torch.cuda.amp.autocast(dtype=torch_dtype):
-                            _, loss, _ = model(x, y)
-                            loss = loss / grad_accum_steps
-                    
-                    with record_function("backward_pass"):
-                        scaler.scale(loss).backward()
-        
-        else:
-            for micro_step in range(grad_accum_steps):
-                with record_function(f"microstep_{micro_step}"):
-                    model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-
-                    with record_function("forward_pass"):
-                        with ctx:
-                            _, loss, _ = model(x, y)
-                            loss = loss / grad_accum_steps
-
-                    with record_function("data_loading"):
-                        x, y = train_loader.next_batch()
-                    
-                    loss_stats.append(loss.cpu())
-                    
-                    with record_function("backward_pass"):
-                        scaler.scale(loss).backward()
-
-        with record_function("optimizer_step"):
-            if TrainingConfig.grad_clip != 0.0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
-
-            scaler.step(optimizer)
-            scaler.update()
-
-
-
+                        with record_function("forward_pass"):
+                            with torch.cuda.amp.autocast(dtype=torch_dtype):
+                                _, loss, _ = model(x, y)
+                                loss = loss / grad_accum_steps
+                        
+                        with record_function("backward_pass"):
+                            scaler.scale(loss).backward()
             
-
-        if profiler_enabled and master_process:
-            if profiler_start_iter <= iter < profiler_start_iter + profiler_duration:
-                prof.step()
-            elif iter == profiler_start_iter + profiler_duration:
-                prof.stop()
-                print("✅ Profiling complete! Check ./profiler_logs/ for traces")
-                profiler_enabled = False  # Disable after profiling    
-
-        
-        
-        if master_process:
-            torch.cuda.synchronize()
-            mem = torch.cuda.memory_reserved()
-            dt = (perf_counter() - t0) * 1000
+            elif parallel_flag == 5:
+                for micro_step in range(grad_accum_steps):
+                    with record_function(f"microstep_{micro_step}"):
+                        
+                        with record_function("data_loading"):
+                            if master_process:
+                                x, y = train_loader.next_batch()
+                            else:
+                                x = torch.empty(B, T, dtype=torch.long, device=device)
+                                y = torch.empty(B, T, dtype=torch.long, device=device)
+                            
+                            x, y = broadcast_batch(x, y, src=0)
+                        
+                        with record_function("forward_pass"):
+                            with torch.cuda.amp.autocast(dtype=torch_dtype):
+                                _, loss, _ = model(x, y)
+                                loss = loss / grad_accum_steps
+                        
+                        with record_function("backward_pass"):
+                            scaler.scale(loss).backward()
             
-            tokens_per_iter = B * T * grad_accum_steps * ddp_world_size
-            tokens_per_sec = tokens_per_iter / (dt / 1000.0)
-
-           
-
-
-            n_gpus = 2
-            print("active->", active)
-
-            mfu_pct = arnav_compute_mfu_from_configs(
-                dt_ms=dt,
-                n_params_active=active,
-                model_cfg=ModelConfig,
-                training_cfg=TrainingConfig,
-                n_gpus=n_gpus,
-                grad_accum_steps=grad_accum_steps,
-                peak_tflops_per_gpu=65.0,  # e.g. T4 ≈ 65 TFLOPS (fp16)
-                include_attention=True,
-                
-            )
-
-            print(f"MFU: {mfu_pct:.2f}%")
-            mfu = mfu_pct
-            
-
-            
-
-            running_mfu = (
-                mfu_pct if running_mfu < 0
-                else 0.9 * running_mfu + 0.1 * mfu_pct
-            )
-
-            mfu = mfu_pct
-
-            print(
-                # f"iter {iter_num}: "
-                # f"loss {lossf:.4f}, "
-                # f"time {dt_ms:.2f}ms, "
-                f"mfu {running_mfu:.2f}%"
-            )
-
-
-
-            # print(
-            #     f"step: {iter} | "
-            #     f"loss:{loss.item()*grad_accum_steps:.4f} | "
-            #     f"dt:{dt:.2f}ms | "
-            #     f"tok/s:{tokens_per_sec:,.0f} | "
-            #     f"MFU:{mfu:.2f}% | "
-            #     f"GPU RAM:{mem/1024**3:.2f}GB"
-            # )
-            if use_wandb:
-                log_data = {
-                "train/loss": loss.detach() * grad_accum_steps,  # Tensor for graph
-                "train/lr": torch.tensor(lr, device=device),
-                "train/step": iter,
-                "perf/iteration_time_ms": dt,
-                "perf/throughput_tokens_per_sec": tokens_per_sec,
-                "perf/throughput_tokens_per_sec_per_gpu": tokens_per_sec / ddp_world_size,
-                "perf/mfu_percent": mfu,
-                "memory/allocated_gb": torch.cuda.memory_allocated() / (1024**3),
-                "memory/reserved_gb": torch.cuda.memory_reserved() / (1024**3),
-                "memory/max_allocated_gb": torch.cuda.max_memory_allocated() / (1024**3),
-                }
-                # Add gradient norms for better debugging
-                if TrainingConfig.grad_clip != 0.0:
-                    total_norm = 0.0
-                    for p in model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** 0.5
-                    log_data["train/grad_norm"] = total_norm
-                
-                wandb.log(log_data)
-                
-                # Add MFU if computed
-                if 'mfu' in locals():
-                    log_data["perf/mfu_percent"] = mfu
-            
-                wandb.log(log_data)
-        
-            # Print to console
-            if 'mfu' in locals():
-                print(
-                    f"step: {iter} | "
-                    f"loss:{loss.item()*grad_accum_steps:.4f} | "
-                    f"dt:{dt:.2f}ms | "
-                    f"tok/s:{tokens_per_sec:,.0f} | "
-                    f"MFU:{mfu:.2f}% | "
-                    f"GPU RAM:{mem/1024**3:.2f}GB"
-                )
             else:
-                print(
-                    f"step: {iter} | "
-                    f"loss:{loss.item()*grad_accum_steps:.4f} | "
-                    f"dt:{dt:.2f}ms | "
-                    f"tok/s:{tokens_per_sec:,.0f} | "
-                    f"GPU RAM:{mem/1024**3:.2f}GB"
+                for micro_step in range(grad_accum_steps):
+                    with record_function(f"microstep_{micro_step}"):
+                        model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+
+                        with record_function("forward_pass"):
+                            with ctx:
+                                _, loss, _ = model(x, y)
+                                loss = loss / grad_accum_steps
+
+                        with record_function("data_loading"):
+                            x, y = train_loader.next_batch()
+                        
+                        loss_stats.append(loss.cpu())
+                        
+                        with record_function("backward_pass"):
+                            scaler.scale(loss).backward()
+
+            with record_function("optimizer_step"):
+                if TrainingConfig.grad_clip != 0.0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), TrainingConfig.grad_clip)
+
+                scaler.step(optimizer)
+                scaler.update()
+
+
+
+                
+
+            # if profiler_enabled and master_process:
+            #     if profiler_start_iter <= iter < profiler_start_iter + profiler_duration:
+            #         prof.step()
+            #     elif iter == profiler_start_iter + profiler_duration:
+            #         prof.stop()
+            #         print("✅ Profiling complete! Check ./profiler_logs/ for traces")
+            #         profiler_enabled = False  # Disable after profiling  
+            # 
+            if profiler_enabled:
+                if profiler_start_iter <= iter < profiler_start_iter + profiler_total_steps:
+                    prof.step()
+                elif iter == profiler_start_iter + profiler_total_steps:
+                    profiler_enabled = False  
+
+            
+            
+            if master_process:
+                torch.cuda.synchronize()
+                mem = torch.cuda.memory_reserved()
+                dt = (perf_counter() - t0) * 1000
+                
+                tokens_per_iter = B * T * grad_accum_steps * ddp_world_size
+                tokens_per_sec = tokens_per_iter / (dt / 1000.0)
+
+            
+
+
+                n_gpus = 2
+                print("active->", active)
+
+                mfu_pct = arnav_compute_mfu_from_configs(
+                    dt_ms=dt,
+                    n_params_active=active,
+                    model_cfg=ModelConfig,
+                    training_cfg=TrainingConfig,
+                    n_gpus=n_gpus,
+                    grad_accum_steps=grad_accum_steps,
+                    peak_tflops_per_gpu=65.0,  # e.g. T4 ≈ 65 TFLOPS (fp16)
+                    include_attention=True,
+                    
                 )
+
+                print(f"MFU: {mfu_pct:.2f}%")
+                mfu = mfu_pct
+                
+
+                
+
+                running_mfu = (
+                    mfu_pct if running_mfu < 0
+                    else 0.9 * running_mfu + 0.1 * mfu_pct
+                )
+
+                mfu = mfu_pct
+
+                print(
+                    # f"iter {iter_num}: "
+                    # f"loss {lossf:.4f}, "
+                    # f"time {dt_ms:.2f}ms, "
+                    f"mfu {running_mfu:.2f}%"
+                )
+
+
+
+                # print(
+                #     f"step: {iter} | "
+                #     f"loss:{loss.item()*grad_accum_steps:.4f} | "
+                #     f"dt:{dt:.2f}ms | "
+                #     f"tok/s:{tokens_per_sec:,.0f} | "
+                #     f"MFU:{mfu:.2f}% | "
+                #     f"GPU RAM:{mem/1024**3:.2f}GB"
+                # )
+                if use_wandb:
+                    log_data = {
+                    "train/loss": loss.detach() * grad_accum_steps,  # Tensor for graph
+                    "train/lr": torch.tensor(lr, device=device),
+                    "train/step": iter,
+                    "perf/iteration_time_ms": dt,
+                    "perf/throughput_tokens_per_sec": tokens_per_sec,
+                    "perf/throughput_tokens_per_sec_per_gpu": tokens_per_sec / ddp_world_size,
+                    "perf/mfu_percent": mfu,
+                    "memory/allocated_gb": torch.cuda.memory_allocated() / (1024**3),
+                    "memory/reserved_gb": torch.cuda.memory_reserved() / (1024**3),
+                    "memory/max_allocated_gb": torch.cuda.max_memory_allocated() / (1024**3),
+                    }
+                    # Add gradient norms for better debugging
+                    if TrainingConfig.grad_clip != 0.0:
+                        total_norm = 0.0
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm += param_norm.item() ** 2
+                        total_norm = total_norm ** 0.5
+                        log_data["train/grad_norm"] = total_norm
+                    
+                    wandb.log(log_data)
+                    
+                    # Add MFU if computed
+                    if 'mfu' in locals():
+                        log_data["perf/mfu_percent"] = mfu
+                
+                    wandb.log(log_data)
+            
+                # Print to console
+                if 'mfu' in locals():
+                    print(
+                        f"step: {iter} | "
+                        f"loss:{loss.item()*grad_accum_steps:.4f} | "
+                        f"dt:{dt:.2f}ms | "
+                        f"tok/s:{tokens_per_sec:,.0f} | "
+                        f"MFU:{mfu:.2f}% | "
+                        f"GPU RAM:{mem/1024**3:.2f}GB"
+                    )
+                else:
+                    print(
+                        f"step: {iter} | "
+                        f"loss:{loss.item()*grad_accum_steps:.4f} | "
+                        f"dt:{dt:.2f}ms | "
+                        f"tok/s:{tokens_per_sec:,.0f} | "
+                        f"GPU RAM:{mem/1024**3:.2f}GB"
+                    )
+
+
+
 
     # Cleanup
     if parallel_flag == 6:
