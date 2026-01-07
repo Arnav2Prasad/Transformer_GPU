@@ -861,7 +861,7 @@ else:
 
             # print(f"MFU: {mfu_pct:.2f}%")
             # mfu = mfu_pct
-            mfu_pct = compute_mfu_from_configs(
+            mfu_pct = arnav_compute_mfu_from_configs(
                 dt_ms=dt_ms,
                 n_params_active=active,          # 23,516,672
                 model_cfg=ModelConfig,
