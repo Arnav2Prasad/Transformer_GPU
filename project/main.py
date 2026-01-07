@@ -69,6 +69,7 @@ from data.utils import tokenize_and_save
 
 # from ar_logging.mfu import compute_mfu_a40
 from ar_logging.mfu import compute_mfu_from_configs
+from ar_logging.mfu import arnav_compute_mfu_from_configs
 
 
 from ar_logging.profiler import create_profiler
@@ -828,19 +829,37 @@ else:
             #     n_gpus=ddp_world_size,
             #     include_attention=True,
             # )
+            # n_gpus = 2
+            # print('active->', active)
+            # mfu_pct = compute_mfu_from_configs(
+            #     dt=dt,
+            #     n_params_active=active,
+            #     model_cfg=ModelConfig,
+            #     training_cfg=TrainingConfig,
+            #     n_gpus=n_gpus,
+            #     peak_tflops_per_gpu=65.0,   # pass this from wherever you keep HW constants
+            #     include_attention=True,
+            # )
+            # print(f"MFU: {mfu_pct:.2f}%")
+            # mfu = mfu_pct
+
+
             n_gpus = 2
-            print('active->', active)
-            mfu_pct = compute_mfu_from_configs(
+            print("active->", active)
+
+            mfu_pct = arnav_compute_mfu_from_configs(
                 dt=dt,
                 n_params_active=active,
                 model_cfg=ModelConfig,
                 training_cfg=TrainingConfig,
                 n_gpus=n_gpus,
-                peak_tflops_per_gpu=65.0,   # pass this from wherever you keep HW constants
+                peak_tflops_per_gpu=65.0,  # e.g. T4 ≈ 65 TFLOPS (fp16)
                 include_attention=True,
             )
+
             print(f"MFU: {mfu_pct:.2f}%")
             mfu = mfu_pct
+
 
 
             # print(
