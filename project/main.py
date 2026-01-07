@@ -703,17 +703,37 @@ else:
     profiler_start_iter = 10  # Start profiling after N iterations
     profiler_duration = 10    # Profile for N iterations
 
-    if profiler_enabled and master_process:
-        # prof = create_profiler(output_dir="./profiler_logs")
-        prof = create_profiler(
-            output_dir="./llama_profiler_logs",
-            enable_memory=True,      # Enable for detailed memory analysis
-            enable_stack_trace=True, # Enable for debugging
-            enable_flops=True,       # Enable for performance analysis
-            device=device
-        )
-        prof.start()
-        print("🔍 Profiler initialized")
+
+
+
+
+    # if profiler_enabled and master_process:
+    #     # prof = create_profiler(output_dir="./profiler_logs")
+    #     prof = create_profiler(
+    #         output_dir="./llama_profiler_logs",
+    #         enable_memory=True,      # Enable for detailed memory analysis
+    #         enable_stack_trace=True, # Enable for debugging
+    #         enable_flops=True,       # Enable for performance analysis
+    #         device=device
+    #     )
+    #     prof.start()
+    #     print("🔍 Profiler initialized")
+
+
+
+
+    # Create enhanced profiler
+    profiler = create_profiler(
+        output_dir="./llama_profiler_logs",
+        enable_memory=True,      # Enable for detailed memory analysis
+        enable_stack_trace=True, # Enable for debugging
+        enable_flops=True,       # Enable for performance analysis
+        device=device
+    )
+
+
+
+    
 
     for iter in range(TrainingConfig.max_iters + 1):
         t0 = perf_counter()
@@ -805,6 +825,10 @@ else:
 
             scaler.step(optimizer)
             scaler.update()
+
+
+
+            
 
         if profiler_enabled and master_process:
             if profiler_start_iter <= iter < profiler_start_iter + profiler_duration:
