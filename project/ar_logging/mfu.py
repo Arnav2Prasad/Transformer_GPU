@@ -320,7 +320,7 @@ def compute_mfu_from_configs(
 
 
 def arnav_compute_mfu_from_configs(
-    dt: float,
+    dt_ms: float,
     n_params_active: int,
     model_cfg,
     training_cfg,
@@ -355,6 +355,8 @@ def arnav_compute_mfu_from_configs(
     float
         MFU percentage (0–100)
     """
+
+    dt = dt_ms / 1000.0
 
     # Unpack model config
     L = model_cfg.n_layer
