@@ -4,7 +4,7 @@ import tiktoken
 import numpy as np
 
 
-'''
+
 # _______________ DATASET _________________
 def tokenize_and_save():
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -88,3 +88,5 @@ def tokenize_and_save():
     print(f"Training tokens: {len(train_data)}")
     print(f"Validation tokens: {len(val_data)}")
     print(f"Vocabulary size: {enc.n_vocab}")
+
+'''
