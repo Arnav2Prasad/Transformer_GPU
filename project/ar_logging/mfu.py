@@ -327,7 +327,7 @@ def compute_mfu_from_configs(
 
 
 
-
+'''
 def arnav_compute_mfu_from_configs(
     dt_ms: float,
     n_params_active: int,
@@ -391,6 +391,104 @@ def arnav_compute_mfu_from_configs(
     flops_peak = peak_tflops_per_gpu * 1e12 * n_gpus
 
     # MFU
+    mfu = flops_achieved / flops_peak
+
+    return mfu * 100.0
+'''
+
+
+
+
+def arnav_compute_mfu_from_configs(
+    dt_ms: float,
+    seq_len: int,
+    n_params_active: int,
+    model_cfg,
+    n_gpus: int,
+    peak_tflops_per_gpu: float,
+    grad_accum_steps: int = 1,
+    include_attention: bool = True,
+):
+    """
+    Compute Model FLOPs Utilization (MFU).
+
+    This MFU is an *upper-bound dense compute MFU*, consistent with
+    PaLM / Megatron / GPT-NeoX style reporting.
+
+    Parameters
+    ----------
+    dt_ms : float
+        Wall-clock time PER MICRO-STEP (milliseconds).
+        ⚠️ Must NOT be optimizer-step time.
+    seq_len : int
+        Actual sequence length used (not block_size).
+    n_params_active : int
+        Number of ACTIVE parameters (MoE-aware).
+    model_cfg : object
+        ModelConfig (expects n_layer, n_head, n_kv_heads, n_embd).
+    n_gpus : int
+        Number of GPUs.
+    peak_tflops_per_gpu : float
+        Peak TFLOPs per GPU (FP16/BF16/TF32).
+    grad_accum_steps : int
+        Gradient accumulation steps.
+    include_attention : bool
+        Whether to include attention FLOPs.
+
+    Returns
+    -------
+    float
+        MFU percentage.
+    """
+
+    # Convert time to seconds
+    dt = dt_ms / 1000.0
+
+    # Unpack model config
+    L = model_cfg.n_layer
+    Hq = model_cfg.n_head
+    Hkv = getattr(model_cfg, "n_kv_heads", Hq)
+    d = model_cfg.n_embd // Hq
+    T = seq_len
+
+    # ---------------------------------------------------------
+    # 1️⃣ Dense model FLOPs (PaLM-style)
+    # ---------------------------------------------------------
+    # Forward + backward ≈ 6 FLOPs per parameter per token
+    flops_per_token = 6 * n_params_active
+
+    # ---------------------------------------------------------
+    # 2️⃣ Attention FLOPs (GQA-correct)
+    # ---------------------------------------------------------
+    if include_attention:
+        # QK^T + softmax + AV
+        # Forward + backward
+        attn_flops = 12 * L * Hq * Hkv * d * T
+        flops_per_token += attn_flops
+
+    # ---------------------------------------------------------
+    # 3️⃣ FLOPs per micro-step
+    # ---------------------------------------------------------
+    flops_per_micro_step = flops_per_token * T
+
+    # ---------------------------------------------------------
+    # 4️⃣ FLOPs per optimizer step
+    # ---------------------------------------------------------
+    flops_per_iter = flops_per_micro_step * grad_accum_steps
+
+    # ---------------------------------------------------------
+    # 5️⃣ Achieved FLOPs/sec
+    # ---------------------------------------------------------
+    flops_achieved = flops_per_iter / (dt * grad_accum_steps)
+
+    # ---------------------------------------------------------
+    # 6️⃣ Peak FLOPs/sec
+    # ---------------------------------------------------------
+    flops_peak = peak_tflops_per_gpu * 1e12 * n_gpus
+
+    # ---------------------------------------------------------
+    # 7️⃣ MFU
+    # ---------------------------------------------------------
     mfu = flops_achieved / flops_peak
 
     return mfu * 100.0
