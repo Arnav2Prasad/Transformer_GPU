@@ -67,7 +67,8 @@ from data.loader import DataLoader
 from data.utils import tokenize_and_save
 
 
-from ar_logging.mfu import compute_mfu_a40
+# from ar_logging.mfu import compute_mfu_a40
+from ar_logging.mfu import compute_mfu_from_configs
 
 
 from ar_logging.profiler import create_profiler
