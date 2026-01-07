@@ -862,8 +862,8 @@ else:
 
             # print(f"MFU: {mfu_pct:.2f}%")
             # mfu = mfu_pct
-            n_gpus = 2
-            
+            n_gpus = 4
+
             mfu_pct = arnav_compute_mfu_from_configs(
                 dt_ms=dt,
                 n_params_active=active,          # 23,516,672
@@ -871,7 +871,7 @@ else:
                 training_cfg=TrainingConfig,
                 n_gpus=n_gpus,               # or dist.get_world_size()
                 grad_accum_steps = grad_accum_steps,
-                peak_tflops_per_gpu=65.0,        # CHANGE based on your GPU!
+                peak_tflops_per_gpu=149.7,        # CHANGE based on your GPU!
                 include_attention=True,
             )
 
