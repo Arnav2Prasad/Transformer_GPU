@@ -879,9 +879,9 @@ else:
             )
 
             print(
-                f"iter {iter_num}: "
-                f"loss {lossf:.4f}, "
-                f"time {dt_ms:.2f}ms, "
+                # f"iter {iter_num}: "
+                # f"loss {lossf:.4f}, "
+                # f"time {dt_ms:.2f}ms, "
                 f"mfu {running_mfu:.2f}%"
             )
 
