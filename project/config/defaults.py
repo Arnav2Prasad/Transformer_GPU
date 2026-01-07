@@ -11,7 +11,7 @@ import os
 
 TrainingConfig = Trainconfig(
     dataset='shakespeare',
-    total_batch_size = 2**12,
+    total_batch_size = 2**13,
     batch_size = 2**1, # how many independent sequences will we process in parallel?
     max_iters = 2500,
     eval = False,
@@ -31,7 +31,7 @@ ModelConfig = LLMconfig(
     vocab_size = 50304, 
     block_size = 2**10,
     # n_embd = 256, 
-    n_embd = 768, 
+    n_embd = 512, 
     pos_emb = 'rope',
     
     # MoE
