@@ -862,7 +862,7 @@ else:
 
             # print(f"MFU: {mfu_pct:.2f}%")
             # mfu = mfu_pct
-            n_gpus = 4
+            n_gpus = 2
 
             mfu_pct = arnav_compute_mfu_from_configs(
                 dt_ms=dt,
