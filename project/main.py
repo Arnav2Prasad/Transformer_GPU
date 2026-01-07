@@ -855,6 +855,7 @@ else:
                 n_gpus=n_gpus,
                 peak_tflops_per_gpu=65.0,  # e.g. T4 ≈ 65 TFLOPS (fp16)
                 include_attention=True,
+                grad_accum_steps=grad_accum_steps,
             )
 
             print(f"MFU: {mfu_pct:.2f}%")

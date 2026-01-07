@@ -327,6 +327,7 @@ def arnav_compute_mfu_from_configs(
     n_gpus: int,
     peak_tflops_per_gpu: float,
     include_attention: bool = True,
+    grad_accum_steps: int,
 ):
     """
     Compute Model FLOPs Utilization (MFU) as a percentage.
