@@ -258,7 +258,7 @@ def compute_mfu_from_configs(
     if n_params_active <= 0:
         raise ValueError("n_params_active must be > 0")
 
-
+    dt_ms = dt
     dt_s = dt_ms / 1000.0
 
     # ---- Pull model dimensions from config ----
