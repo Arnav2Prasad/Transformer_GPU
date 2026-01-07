@@ -831,7 +831,7 @@ else:
             n_gpus = 2
             mfu_pct = compute_mfu_from_configs(
                 dt=dt,
-                n_params_active=n_params_active,
+                n_params_active=active,
                 model_cfg=ModelConfig,
                 training_cfg=TrainingConfig,
                 n_gpus=n_gpus,
