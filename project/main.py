@@ -592,20 +592,20 @@ if use_wandb:
 
 if parallel_flag == 7:
     # ============== PIPELINE PARALLELISM TRAINING ==============
-    use_wandb = not TrainingConfig.no_wandb and master_process
-    if use_wandb:
-        if not TrainingConfig.wandb_run_name:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            TrainingConfig.wandb_run_name = f"pipeline_{TrainingConfig.dataset}_{timestamp}"
+    # use_wandb = not TrainingConfig.no_wandb and master_process
+    # if use_wandb:
+    #     if not TrainingConfig.wandb_run_name:
+    #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #         TrainingConfig.wandb_run_name = f"pipeline_{TrainingConfig.dataset}_{timestamp}"
         
-        wandb.init(
-            project=TrainingConfig.wandb_project,
-            entity=TrainingConfig.wandb_entity,
-            name=TrainingConfig.wandb_run_name,
-            notes=TrainingConfig.wandb_notes,
-            tags=TrainingConfig.wandb_tags + ["pipeline_parallel", f"chunks_{TrainingConfig.chunks}"],
-            config=vars(TrainingConfig)
-        )
+    #     wandb.init(
+    #         project=TrainingConfig.wandb_project,
+    #         entity=TrainingConfig.wandb_entity,
+    #         name=TrainingConfig.wandb_run_name,
+    #         notes=TrainingConfig.wandb_notes,
+    #         tags=TrainingConfig.wandb_tags + ["pipeline_parallel", f"chunks_{TrainingConfig.chunks}"],
+    #         config=vars(TrainingConfig)
+    #     )
 
     config = ModelConfig
 
@@ -656,6 +656,9 @@ if parallel_flag == 7:
         max_iters=TrainingConfig.max_iters,
         learning_rate=TrainingConfig.learning_rate
     )
+
+    if use_wandb:
+        wandb.finish()
     
     # Cleanup
     if dist.is_initialized():
