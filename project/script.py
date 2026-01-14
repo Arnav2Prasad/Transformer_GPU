@@ -738,7 +738,7 @@ def run_torchrun_and_capture(i, capture_all=False):
     """Run the torchrun command and capture all output."""
     cmd = (
         "torchrun --standalone --nproc_per_node=2 main.py "
-        "--moe --aux_free --eval --max_iters=50 --eval_interval=50 --attn gqa"
+        "--moe --aux_free --eval --max_iters=10 --eval_interval=50 --attn gqa"
     )
     
     print(f"Running torchrun command for i={i}...")
