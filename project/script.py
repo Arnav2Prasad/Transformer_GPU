@@ -632,7 +632,7 @@ def run_torchrun_and_capture(i):
     """Run the torchrun command and capture all output."""
     cmd = (
         "torchrun --standalone --nproc_per_node=2 main.py "
-        "--moe --aux_free --eval --max_iters=20 --eval_interval=50 --attn gqa"
+        "--moe --aux_free --eval --max_iters=10 --eval_interval=50 --attn gqa"
     )
     
     print(f"Running torchrun command for i={i}...")
@@ -813,6 +813,12 @@ def commit_and_push_to_github(run_number, files_count):
         os.chdir(LOCAL_REPO_PATH)
         
         # Add all files
+        # ✅ ADD THESE 2 LINES HERE - FORCE GIT CONFIG
+        print("Configuring git identity...")
+        subprocess.run(["git", "config", "user.email", "arnav2prasad@example.com"], check=True)
+        subprocess.run(["git", "config", "user.name", "Arnav2Prasad"], check=True)
+        
+        
         subprocess.run(["git", "add", "."], check=True)
         print("✓ Files added to git")
         
