@@ -768,9 +768,11 @@ def copy_output_files_to_repo(run_number, output_dir="."):
                     try:
                         shutil.copy2(source_path, dest_path)
                         files_copied.append(rel_path)
-                        print(f"    ✓ Copied: {rel_path}")
+                        # print(f"    ✓ Copied: {rel_path}")
                     except Exception as e:
                         print(f"    ✗ Failed to copy {rel_path}: {e}")
+
+                    print('all files have been copied.....')
     
     # Create a manifest file
     manifest = {
@@ -853,6 +855,10 @@ def create_summary_file(total_runs, success_runs):
     
     print(f"\n📋 Execution summary saved to: {summary_path}")
     return summary_path
+
+
+
+
 
 def main():
     global start_time
@@ -965,6 +971,10 @@ def main():
         print(f"  To enable GitHub backup, edit .env file and add your token.")
     
     print(f"{'='*80}")
+
+
+
+
 
 if __name__ == "__main__":
     # Install required package if not already installed
