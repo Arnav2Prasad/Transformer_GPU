@@ -629,7 +629,7 @@ def run_torchrun_and_capture(i):
     """Run the torchrun command and capture all output."""
     cmd = (
         "torchrun --standalone --nproc_per_node=2 main.py "
-        "--moe --aux_free --eval --max_iters=50 --eval_interval=50 --attn gqa"
+        "--moe --aux_free --eval --max_iters=20 --eval_interval=50 --attn gqa"
     )
     
     print(f"Running torchrun command for i={i}...")
@@ -750,6 +750,14 @@ def copy_output_files_to_repo(run_number, output_dir="."):
             for root, dirs, files in os.walk(output_dir):
                 # Skip .git directories
                 if '.git' in root:
+                    continue
+
+                # Skip .git directories AND monitor_logs directories
+                if '.git' in root or 'monitor_logs' in root:
+                    continue
+                
+                # Also skip the Transformer_GPU directory itself
+                if 'Transformer_GPU' in root and 'monitor_logs' in root:
                     continue
                     
                 for file in files:
