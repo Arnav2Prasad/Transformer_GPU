@@ -596,6 +596,60 @@ GIT_USER_EMAIL = os.getenv("GIT_USER_EMAIL", "arnav.pr")
 
 
 
+
+import sys
+from contextlib import redirect_stdout, redirect_stderr
+import io
+
+class OutputCapture:
+    """Capture all screen output to file and console."""
+    def __init__(self, log_file_path):
+        self.log_file_path = log_file_path
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+        self.log_file = None
+        
+    def __enter__(self):
+        # Open log file in append mode
+        self.log_file = open(self.log_file_path, 'a', encoding='utf-8')
+        
+        # Create a custom stream that writes to both console and file
+        class TeeOutput:
+            def __init__(self, console, file):
+                self.console = console
+                self.file = file
+                
+            def write(self, data):
+                # Write to console
+                self.console.write(data)
+                # Write to file
+                self.file.write(data)
+                self.file.flush()
+                
+            def flush(self):
+                self.console.flush()
+                self.file.flush()
+        
+        # Replace stdout and stderr
+        sys.stdout = TeeOutput(self.original_stdout, self.log_file)
+        sys.stderr = TeeOutput(self.original_stderr, self.log_file)
+        
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore original stdout/stderr
+        sys.stdout = self.original_stdout
+        sys.stderr = self.original_stderr
+        
+        # Close log file
+        if self.log_file:
+            self.log_file.close()
+
+
+
+
+
+
 def create_env_file_if_not_exists():
     """Create .env file with template if it doesn't exist."""
     env_file = ".env"
@@ -627,7 +681,7 @@ def overwrite_train(parallel_value):
 
 
 
-
+'''
 def run_torchrun_and_capture(i):
     """Run the torchrun command and capture all output."""
     cmd = (
@@ -678,7 +732,85 @@ def run_torchrun_and_capture(i):
     
     print(f"\nLog saved to: {log_filepath}")
     return log_filepath
+'''
 
+def run_torchrun_and_capture(i, capture_all=False):
+    """Run the torchrun command and capture all output."""
+    cmd = (
+        "torchrun --standalone --nproc_per_node=2 main.py "
+        "--moe --aux_free --eval --max_iters=50 --eval_interval=50 --attn gqa"
+    )
+    
+    print(f"Running torchrun command for i={i}...")
+    
+    # Create log files
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    console_log_file = f"run_{i}_console_{timestamp}.log"
+    error_log_file = f"run_{i}_error_{timestamp}.log"
+    
+    # Ensure directory exists
+    os.makedirs(f"run_{i}_logs", exist_ok=True)
+    
+    # Open log files
+    with open(console_log_file, 'w', encoding='utf-8') as console_f, \
+         open(error_log_file, 'w', encoding='utf-8') as error_f:
+        
+        # Write headers
+        console_f.write(f"TorchRun Console Output - i={i}\n")
+        console_f.write(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        console_f.write("="*80 + "\n\n")
+        
+        error_f.write(f"TorchRun Error Output - i={i}\n")
+        error_f.write(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        error_f.write("="*80 + "\n\n")
+        
+        # Run command
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1
+        )
+        
+        # Capture stdout and stderr separately
+        import threading
+        
+        def capture_output(stream, output_type="stdout"):
+            """Capture output from a stream."""
+            log_file = console_f if output_type == "stdout" else error_f
+            for line in stream:
+                # Print to console
+                print(line, end='')
+                # Write to appropriate log file
+                log_file.write(line)
+                log_file.flush()
+        
+        # Start threads for capturing
+        stdout_thread = threading.Thread(target=capture_output, args=(process.stdout, "stdout"))
+        stderr_thread = threading.Thread(target=capture_output, args=(process.stderr, "stderr"))
+        
+        stdout_thread.start()
+        stderr_thread.start()
+        
+        # Wait for threads to complete
+        stdout_thread.join()
+        stderr_thread.join()
+        
+        process.wait()
+        
+        # Write footers
+        console_f.write(f"\n\n{'='*80}\n")
+        console_f.write(f"Exit Code: {process.returncode}\n")
+        console_f.write(f"End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        
+        error_f.write(f"\n\n{'='*80}\n")
+        error_f.write(f"Exit Code: {process.returncode}\n")
+        error_f.write(f"End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    
+    print(f"\nLogs saved to: {console_log_file} and {error_log_file}")
+    return console_log_file, error_log_file
 
 
 
@@ -818,7 +950,7 @@ def commit_and_push_to_github(run_number, files_count):
         subprocess.run(["git", "config", "user.email", "arnav2prasad@example.com"], check=True)
         subprocess.run(["git", "config", "user.name", "Arnav2Prasad"], check=True)
         
-        
+
         subprocess.run(["git", "add", "."], check=True)
         print("✓ Files added to git")
         
@@ -879,7 +1011,7 @@ def create_summary_file(total_runs, success_runs):
 
 
 
-
+'''
 def main():
     global start_time
     start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -991,7 +1123,144 @@ def main():
         print(f"  To enable GitHub backup, edit .env file and add your token.")
     
     print(f"{'='*80}")
+'''
 
+
+def main():
+    global start_time
+    
+    # Create a master log file for ALL screen output
+    master_log_file = "complete_execution_log.txt"
+    start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Capture ALL output from this point onward
+    with OutputCapture(master_log_file) as capture:
+        print(f"{'='*80}")
+        print("TORCHRUN EXECUTION WITH GITHUB BACKUP")
+        print(f"Start Time: {start_time}")
+        print(f"GitHub Repo: {GITHUB_REPO_URL}")
+        print(f"Complete log will be saved to: {master_log_file}")
+        print(f"{'='*80}\n")
+        
+        # Check and create .env file if needed
+        env_exists = create_env_file_if_not_exists()
+        
+        if not env_exists:
+            print("\n⚠ Please configure your .env file before continuing.")
+            print("   Required: GITHUB_TOKEN")
+            print("\nPress Enter to continue with local execution only...")
+            input()
+        
+        # Configure git globally
+        print("Configuring git identity globally...")
+        git_email = os.getenv("GIT_USER_EMAIL", "arnav2prasad@example.com")
+        git_name = os.getenv("GIT_USER_NAME", "Arnav2Prasad")
+        
+        subprocess.run(["git", "config", "--global", "user.email", git_email], check=False)
+        subprocess.run(["git", "config", "--global", "user.name", git_name], check=False)
+        
+        # Setup GitHub repository
+        github_enabled = False
+        if GITHUB_TOKEN and GITHUB_TOKEN != "your_github_personal_access_token_here":
+            github_enabled = setup_git_repo()
+        else:
+            print("\n⚠ GitHub token not configured.")
+            print("   Continuing with local execution only...")
+        
+        success_count = 0
+        total_runs = 8
+        
+        for i in range(1, total_runs + 1):
+            print(f"\n{'#'*80}")
+            print(f"STARTING RUN {i}/{total_runs}")
+            print(f"Time: {datetime.now().strftime('%H:%M:%S')}")
+            print(f"{'#'*80}\n")
+            
+            try:
+                # Overwrite train.py
+                overwrite_train(i)
+                
+                # Run torchrun and capture output
+                log_file = run_torchrun_and_capture(i)
+                
+                # Copy output files to GitHub repo
+                run_folder, files_count = copy_output_files_to_repo(i)
+                
+                # Commit and push to GitHub
+                if github_enabled:
+                    if commit_and_push_to_github(i, files_count):
+                        success_count += 1
+                else:
+                    print(f"⚠ GitHub not enabled. Files saved locally to: {run_folder}")
+                    success_count += 1
+                
+                print(f"\n{'✓'*40}")
+                print(f"RUN {i} COMPLETED SUCCESSFULLY")
+                print(f"Files saved: {files_count}")
+                if github_enabled:
+                    print(f"Pushed to GitHub: ✓")
+                print(f"{'✓'*40}")
+                
+            except Exception as e:
+                print(f"\n{'✗'*40}")
+                print(f"RUN {i} FAILED: {e}")
+                import traceback
+                traceback.print_exc()  # This will also be captured!
+                print(f"{'✗'*40}")
+            
+            # Add separation between runs
+            if i < total_runs:
+                print(f"\n{'='*80}")
+                print("WAITING 10 SECONDS BEFORE NEXT RUN...")
+                print(f"{'='*80}")
+                time.sleep(10)
+        
+        # Create and push final summary
+        if github_enabled and success_count > 0:
+            print(f"\n{'='*80}")
+            print("CREATING FINAL EXECUTION SUMMARY...")
+            summary_file = create_summary_file(total_runs, success_count)
+            
+            # Also copy the master log file to GitHub
+            if os.path.exists(master_log_file):
+                print(f"Copying complete execution log to GitHub...")
+                shutil.copy2(master_log_file, os.path.join(MONITOR_LOGS_DIR, "complete_execution_log.txt"))
+            
+            # Push everything to GitHub
+            os.chdir(LOCAL_REPO_PATH)
+            subprocess.run(["git", "add", "."], check=True)
+            subprocess.run(["git", "commit", "-m", f"Add execution summary - {success_count}/{total_runs} runs completed"], check=True)
+            
+            if GITHUB_TOKEN:
+                auth_url = f"https://{GITHUB_TOKEN}@github.com/{GITHUB_USERNAME}/{REPO_NAME}.git"
+                subprocess.run(["git", "remote", "set-url", "origin", auth_url], check=True)
+            
+            subprocess.run(["git", "push", "origin", "main"], check=True)
+            os.chdir("..")
+        
+        # Final output
+        print(f"\n{'='*80}")
+        print("EXECUTION COMPLETE!")
+        print(f"{'='*80}")
+        print(f"Total runs: {total_runs}")
+        print(f"Successful runs: {success_count}")
+        print(f"Start time: {start_time}")
+        print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        if github_enabled:
+            print(f"\n✅ All logs have been saved to GitHub repository:")
+            print(f"  Repository: {GITHUB_REPO_URL}")
+            print(f"  Local path: {os.path.abspath(LOCAL_REPO_PATH)}")
+            print(f"  Monitor logs: {os.path.abspath(MONITOR_LOGS_DIR)}")
+        else:
+            print(f"\n⚠ GitHub backup not enabled.")
+            print(f"  Local files saved to: {os.path.abspath('.')}")
+        
+        print(f"\n📋 Complete screen log saved to: {os.path.abspath(master_log_file)}")
+        print(f"{'='*80}")
+    
+    # After context manager exits, print final message
+    print(f"\n🎉 Execution finished! Check {master_log_file} for complete logs.")
 
 
 
