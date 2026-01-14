@@ -1,0 +1,14 @@
+# Environment variables
+.env
+.env.*
+
+# macOS junk
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
