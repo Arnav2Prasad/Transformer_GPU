@@ -1,0 +1,128 @@
+_wandb:
+    value:
+        cli_version: 0.22.2
+        e:
+            9zmsfk9r6z1bot1q2htbal0z6ntezr3l:
+                args:
+                    - --moe
+                    - --aux_free
+                    - --eval
+                    - --max_iters=10
+                    - --eval_interval=50
+                    - --attn
+                    - gqa
+                codePath: project/main.py
+                codePathLocal: main.py
+                cpu_count: 2
+                cpu_count_logical: 4
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "8656922775552"
+                        used: "7121896026112"
+                email: adeeb.idris@gmail.com
+                executable: /usr/bin/python3
+                git:
+                    commit: 46eb3c21baaafb70b8f248042757b586377b9f2f
+                    remote: https://github.com/Arnav2Prasad/Transformer_GPU.git
+                gpu: Tesla T4
+                gpu_count: 2
+                gpu_nvidia:
+                    - architecture: Turing
+                      cudaCores: 2560
+                      memoryTotal: "16106127360"
+                      name: Tesla T4
+                      uuid: GPU-5864e00d-d9da-e96d-5dab-44b5fc347297
+                    - architecture: Turing
+                      cudaCores: 2560
+                      memoryTotal: "16106127360"
+                      name: Tesla T4
+                      uuid: GPU-209ebb77-92c5-e3af-ba3f-61de081b8ca8
+                host: ba2c0b1a4ce8
+                memory:
+                    total: "33662472192"
+                os: Linux-6.6.105+-x86_64-with-glibc2.35
+                program: /kaggle/working/Transformer_GPU/project/main.py
+                python: CPython 3.12.12
+                root: /kaggle/working/Transformer_GPU/project
+                startedAt: "2026-01-14T17:40:36.056425Z"
+                writerId: 9zmsfk9r6z1bot1q2htbal0z6ntezr3l
+        m: []
+        python_version: 3.12.12
+        t:
+            "1":
+                - 1
+                - 105
+            "2":
+                - 1
+                - 105
+            "3":
+                - 1
+                - 2
+                - 13
+                - 15
+                - 16
+            "4": 3.12.12
+            "5": 0.22.2
+            "8":
+                - 2
+            "12": 0.22.2
+            "13": linux-x86_64
+act_recomp:
+    value: false
+active_params:
+    value: 110777344
+attn:
+    value: gqa
+aux_free:
+    value: true
+batch_size:
+    value: 2
+block_size:
+    value: 1024
+chunks:
+    value: 8
+ddp_world_size:
+    value: 2
+dropout:
+    value: 0
+dtype:
+    value: bfloat16
+grad_accum_steps:
+    value: 2
+grad_clip:
+    value: 1
+learning_rate:
+    value: 0.0003
+max_iters:
+    value: 10
+moe:
+    value: true
+n_act:
+    value: 4
+n_embd:
+    value: 512
+n_exp:
+    value: 8
+n_head:
+    value: 8
+n_kv_heads:
+    value: 4
+n_layer:
+    value: 12
+n_shared:
+    value: 1
+parallel_flag:
+    value: 1
+pos_emb:
+    value: rope
+total_batch_size:
+    value: 8192
+total_params:
+    value: 186274816
+vocab_size:
+    value: 50304
+warmup_steps:
+    value: 100
+world_size:
+    value: 2

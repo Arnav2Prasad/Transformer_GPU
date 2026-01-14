@@ -1,0 +1,56 @@
+{
+  "os": "Linux-6.6.105+-x86_64-with-glibc2.35",
+  "python": "CPython 3.12.12",
+  "startedAt": "2026-01-14T17:40:36.056425Z",
+  "args": [
+    "--moe",
+    "--aux_free",
+    "--eval",
+    "--max_iters=10",
+    "--eval_interval=50",
+    "--attn",
+    "gqa"
+  ],
+  "program": "/kaggle/working/Transformer_GPU/project/main.py",
+  "codePath": "project/main.py",
+  "codePathLocal": "main.py",
+  "git": {
+    "remote": "https://github.com/Arnav2Prasad/Transformer_GPU.git",
+    "commit": "46eb3c21baaafb70b8f248042757b586377b9f2f"
+  },
+  "email": "adeeb.idris@gmail.com",
+  "root": "/kaggle/working/Transformer_GPU/project",
+  "host": "ba2c0b1a4ce8",
+  "executable": "/usr/bin/python3",
+  "cpu_count": 2,
+  "cpu_count_logical": 4,
+  "gpu": "Tesla T4",
+  "gpu_count": 2,
+  "disk": {
+    "/": {
+      "total": "8656922775552",
+      "used": "7121896026112"
+    }
+  },
+  "memory": {
+    "total": "33662472192"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "Tesla T4",
+      "memoryTotal": "16106127360",
+      "cudaCores": 2560,
+      "architecture": "Turing",
+      "uuid": "GPU-5864e00d-d9da-e96d-5dab-44b5fc347297"
+    },
+    {
+      "name": "Tesla T4",
+      "memoryTotal": "16106127360",
+      "cudaCores": 2560,
+      "architecture": "Turing",
+      "uuid": "GPU-209ebb77-92c5-e3af-ba3f-61de081b8ca8"
+    }
+  ],
+  "cudaVersion": "12.8",
+  "writerId": "9zmsfk9r6z1bot1q2htbal0z6ntezr3l"
+}
