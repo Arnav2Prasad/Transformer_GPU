@@ -590,6 +590,9 @@ REPO_NAME = "Transformer_GPU"
 LOCAL_REPO_PATH = "./Transformer_GPU"
 MONITOR_LOGS_DIR = os.path.join(LOCAL_REPO_PATH, "monitor_logs")
 
+GIT_USER_NAME = os.getenv("GIT_USER_NAME", "Arnav2Prasad")
+GIT_USER_EMAIL = os.getenv("GIT_USER_EMAIL", "arnav.pr")
+
 
 
 
@@ -675,6 +678,9 @@ def run_torchrun_and_capture(i):
     
     print(f"\nLog saved to: {log_filepath}")
     return log_filepath
+
+
+
 
 def setup_git_repo():
     """Clone or setup the GitHub repository."""
