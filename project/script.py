@@ -772,7 +772,7 @@ def copy_output_files_to_repo(run_number, output_dir="."):
                     except Exception as e:
                         print(f"    ✗ Failed to copy {rel_path}: {e}")
 
-                    print('all files have been copied.....')
+            print('all files have been copied.....')
     
     # Create a manifest file
     manifest = {
