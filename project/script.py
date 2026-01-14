@@ -885,40 +885,56 @@ def copy_output_files_to_repo(run_number, output_dir="."):
     for output_dir in kaggle_output_dirs:
         if os.path.exists(output_dir):
             print(f"  Scanning: {output_dir}")
-            for root, dirs, files in os.walk(output_dir):
-                # Skip .git directories
-                if '.git' in root:
-                    continue
+            # for root, dirs, files in os.walk(output_dir):
+            #     # Skip .git directories
+            #     if '.git' in root:
+            #         continue
 
-                # Skip .git directories AND monitor_logs directories
-                if '.git' in root or 'monitor_logs' in root:
-                    continue
+            #     # Skip .git directories AND monitor_logs directories
+            #     if '.git' in root or 'monitor_logs' in root:
+            #         continue
                 
-                # Also skip the Transformer_GPU directory itself
-                if 'Transformer_GPU' in root and 'monitor_logs' in root:
-                    continue
+            #     # Also skip the Transformer_GPU directory itself
+            #     if 'Transformer_GPU' in root and 'monitor_logs' in root:
+            #         continue
                     
-                for file in files:
-                    # Skip certain file types
-                    if any(file.endswith(ext) for ext in ['.pyc', '.gitignore', '.git']):
-                        continue
+            #     for file in files:
+            #         # Skip certain file types
+            #         if any(file.endswith(ext) for ext in ['.pyc', '.gitignore', '.git']):
+            #             continue
                     
-                    source_path = os.path.join(root, file)
-                    # Create relative path
-                    rel_path = os.path.relpath(source_path, output_dir)
-                    dest_path = os.path.join(run_folder_path, rel_path)
+            #         source_path = os.path.join(root, file)
+            #         # Create relative path
+            #         rel_path = os.path.relpath(source_path, output_dir)
+            #         dest_path = os.path.join(run_folder_path, rel_path)
                     
-                    # Ensure destination directory exists
-                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            #         # Ensure destination directory exists
+            #         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                     
-                    try:
-                        shutil.copy2(source_path, dest_path)
-                        files_copied.append(rel_path)
-                        # print(f"    ✓ Copied: {rel_path}")
-                    except Exception as e:
-                        print(f"    ✗ Failed to copy {rel_path}: {e}")
+            #         try:
+            #             shutil.copy2(source_path, dest_path)
+            #             files_copied.append(rel_path)
+            #             # print(f"    ✓ Copied: {rel_path}")
+            #         except Exception as e:
+            #             print(f"    ✗ Failed to copy {rel_path}: {e}")
 
-            print('all files have been copied.....')
+            # print('all files have been copied.....')
+            # Define specific files/patterns to copy
+            files_to_copy = []
+            patterns_to_copy = [
+                "wandb/*",                    # All wandb files
+                "manifest.json",              # Manifest file
+                "*.log",                      # Log files
+                "run_*_logs/*",               # Run-specific logs
+                "complete_execution_log.txt", # Complete log if exists
+            ]
+
+            # Collect files matching patterns
+            for pattern in patterns_to_copy:
+                import glob
+                for file_path in glob.glob(pattern, recursive=True):
+                    if os.path.isfile(file_path):  # Only files, not directories
+                        files_to_copy.append(file_path)
     
     # Create a manifest file
     manifest = {
