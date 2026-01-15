@@ -120,64 +120,16 @@ def overwrite_train(parallel_value):
 
 
 
-'''
-def run_torchrun_and_capture(i):
-    """Run the torchrun command and capture all output."""
-    cmd = (
-        "torchrun --standalone --nproc_per_node=2 main.py "
-        "--moe --aux_free --eval --max_iters=10 --eval_interval=50 --attn gqa"
-    )
-    
-    print(f"Running torchrun command for i={i}...")
-    
-    # Create a unique log file for this run
-    log_filename = f"torchrun_i{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    log_filepath = os.path.join(f"run_{i}_logs", log_filename)
-    
-    # Ensure directory exists
-    os.makedirs(f"run_{i}_logs", exist_ok=True)
-    
-    # Run command and capture output
-    process = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        bufsize=1
-    )
-    
-    with open(log_filepath, 'w', encoding='utf-8') as log_f:
-        # Write header
-        log_f.write(f"TorchRun Execution - i={i}\n")
-        log_f.write(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        log_f.write("="*80 + "\n\n")
-        
-        # Capture output in real-time
-        for line in process.stdout:
-            # Print to console
-            print(line, end='')
-            # Write to log file
-            log_f.write(line)
-            log_f.flush()
-    
-    process.wait()
-    
-    # Add footer
-    with open(log_filepath, 'a', encoding='utf-8') as log_f:
-        log_f.write(f"\n\n{'='*80}\n")
-        log_f.write(f"Exit Code: {process.returncode}\n")
-        log_f.write(f"End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-    
-    print(f"\nLog saved to: {log_filepath}")
-    return log_filepath
-'''
+
+
+
+
 
 def run_torchrun_and_capture(i, capture_all=False):
     """Run the torchrun command and capture all output."""
     cmd = (
         "torchrun --standalone --nproc_per_node=2 main.py "
-        "--moe --aux_free --eval --max_iters=10 --eval_interval=50 --attn gqa"
+        "--moe --aux_free --eval --max_iters=250 --eval_interval=50 --attn gqa"
     )
     
     print(f"Running torchrun command for i={i}...")
@@ -324,41 +276,6 @@ def copy_output_files_to_repo(run_number, output_dir="."):
     for output_dir in kaggle_output_dirs:
         if os.path.exists(output_dir):
             print(f"  Scanning: {output_dir}")
-            # for root, dirs, files in os.walk(output_dir):
-            #     # Skip .git directories
-            #     if '.git' in root:
-            #         continue
-
-            #     # Skip .git directories AND monitor_logs directories
-            #     if '.git' in root or 'monitor_logs' in root:
-            #         continue
-                
-            #     # Also skip the Transformer_GPU directory itself
-            #     if 'Transformer_GPU' in root and 'monitor_logs' in root:
-            #         continue
-                    
-            #     for file in files:
-            #         # Skip certain file types
-            #         if any(file.endswith(ext) for ext in ['.pyc', '.gitignore', '.git']):
-            #             continue
-                    
-            #         source_path = os.path.join(root, file)
-            #         # Create relative path
-            #         rel_path = os.path.relpath(source_path, output_dir)
-            #         dest_path = os.path.join(run_folder_path, rel_path)
-                    
-            #         # Ensure destination directory exists
-            #         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                    
-            #         try:
-            #             shutil.copy2(source_path, dest_path)
-            #             files_copied.append(rel_path)
-            #             # print(f"    ✓ Copied: {rel_path}")
-            #         except Exception as e:
-            #             print(f"    ✗ Failed to copy {rel_path}: {e}")
-
-            # print('all files have been copied.....')
-            # Define specific files/patterns to copy
             files_to_copy = []
             patterns_to_copy = [
                 "wandb/*",                    # All wandb files
@@ -390,6 +307,13 @@ def copy_output_files_to_repo(run_number, output_dir="."):
     
     print(f"✓ Copied {len(files_copied)} files to {run_folder_path}")
     return run_folder_path, len(files_copied)
+
+
+
+
+
+
+
 
 def commit_and_push_to_github(run_number, files_count):
     """Commit changes and push to GitHub."""
@@ -466,119 +390,6 @@ def create_summary_file(total_runs, success_runs):
 
 
 
-'''
-def main():
-    global start_time
-    start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    print(f"{'='*80}")
-    print("TORCHRUN EXECUTION WITH GITHUB BACKUP")
-    print(f"Start Time: {start_time}")
-    print(f"GitHub Repo: {GITHUB_REPO_URL}")
-    print(f"{'='*80}\n")
-    
-    # Check and create .env file if needed
-    env_exists = create_env_file_if_not_exists()
-    
-    if not env_exists:
-        print("\n⚠ Please configure your .env file before continuing.")
-        print("   Required: GITHUB_TOKEN")
-        print("\nPress Enter to continue with local execution only...")
-        input()
-    
-    # Setup GitHub repository (only if token exists)
-    github_enabled = False
-    if GITHUB_TOKEN and GITHUB_TOKEN != "your_github_personal_access_token_here":
-        github_enabled = setup_git_repo()
-    else:
-        print("\n⚠ GitHub token not configured.")
-        print("   Continuing with local execution only...")
-    
-    success_count = 0
-    total_runs = 8
-    
-    for i in range(1, total_runs + 1):
-        print(f"\n{'#'*80}")
-        print(f"STARTING RUN {i}/{total_runs}")
-        print(f"Time: {datetime.now().strftime('%H:%M:%S')}")
-        print(f"{'#'*80}\n")
-        
-        try:
-            # Overwrite train.py
-            overwrite_train(i)
-            
-            # Run torchrun and capture output
-            log_file = run_torchrun_and_capture(i)
-            
-            # Copy output files to GitHub repo (if enabled)
-            run_folder, files_count = copy_output_files_to_repo(i)
-            
-            # Commit and push to GitHub (if enabled)
-            if github_enabled:
-                if commit_and_push_to_github(i, files_count):
-                    success_count += 1
-            else:
-                print(f"⚠ GitHub not enabled. Files saved locally to: {run_folder}")
-                success_count += 1
-            
-            print(f"\n{'✓'*40}")
-            print(f"RUN {i} COMPLETED SUCCESSFULLY")
-            print(f"Files saved: {files_count}")
-            if github_enabled:
-                print(f"Pushed to GitHub: ✓")
-            print(f"{'✓'*40}")
-            
-        except Exception as e:
-            print(f"\n{'✗'*40}")
-            print(f"RUN {i} FAILED: {e}")
-            print(f"{'✗'*40}")
-        
-        # Add separation between runs (except after last run)
-        if i < total_runs:
-            print(f"\n{'='*80}")
-            print("WAITING 10 SECONDS BEFORE NEXT RUN...")
-            print(f"{'='*80}")
-            time.sleep(10)
-    
-    # Create and push final summary (if GitHub enabled)
-    if github_enabled and success_count > 0:
-        print(f"\n{'='*80}")
-        print("CREATING FINAL EXECUTION SUMMARY...")
-        summary_file = create_summary_file(total_runs, success_count)
-        
-        # Push the summary to GitHub
-        os.chdir(LOCAL_REPO_PATH)
-        subprocess.run(["git", "add", "."], check=True)
-        subprocess.run(["git", "commit", "-m", f"Add execution summary - {success_count}/{total_runs} runs completed"], check=True)
-        
-        # Ensure remote URL is set with token
-        auth_url = f"https://{GITHUB_USERNAME}:{GITHUB_TOKEN}@github.com/{GITHUB_USERNAME}/{REPO_NAME}.git"
-        subprocess.run(["git", "remote", "set-url", "origin", auth_url], check=True)
-        
-        subprocess.run(["git", "push", "origin", "main"], check=True)
-        os.chdir("..")
-    
-    # Final output
-    print(f"\n{'='*80}")
-    print("EXECUTION COMPLETE!")
-    print(f"{'='*80}")
-    print(f"Total runs: {total_runs}")
-    print(f"Successful runs: {success_count}")
-    print(f"Start time: {start_time}")
-    print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    if github_enabled:
-        print(f"\n✅ All logs have been saved to GitHub repository:")
-        print(f"  Repository: {GITHUB_REPO_URL}")
-        print(f"  Local path: {os.path.abspath(LOCAL_REPO_PATH)}")
-        print(f"  Monitor logs: {os.path.abspath(MONITOR_LOGS_DIR)}")
-    else:
-        print(f"\n⚠ GitHub backup not enabled.")
-        print(f"  Local files saved to: {os.path.abspath('.')}")
-        print(f"  To enable GitHub backup, edit .env file and add your token.")
-    
-    print(f"{'='*80}")
-'''
 
 
 def main():
