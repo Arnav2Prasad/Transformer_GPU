@@ -107,7 +107,7 @@ from train import parallel_flag
 
 
 
-os.environ['WANDB_API_KEY']='c78410b3a816898642987ae3c3899430080b89d1'
+# os.environ['WANDB_API_KEY']='c78410b3a816898642987ae3c3899430080b89d1'
 
 warnings.filterwarnings("ignore")
 
@@ -484,7 +484,7 @@ elif parallel_flag == 4:
         )
     '''
 
-  
+    model = model.to(dtype=torch.bfloat16)
 
     # Now wrap with FSDP
     model = FSDP(
