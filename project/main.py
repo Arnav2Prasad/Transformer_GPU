@@ -875,7 +875,7 @@ else:
                     training_cfg=TrainingConfig,
                     n_gpus=n_gpus,
                     grad_accum_steps=grad_accum_steps,
-                    peak_tflops_per_gpu=65.0,  # e.g. T4 ≈ 65 TFLOPS (fp16)
+                    peak_tflops_per_gpu=312,  # e.g. T4 ≈ 65 TFLOPS (fp16)
                     include_attention=True,
                     
                 )

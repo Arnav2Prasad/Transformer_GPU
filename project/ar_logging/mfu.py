@@ -16,6 +16,7 @@ def compute_mfu_a40(
     """
 
     # NVIDIA A40 peak FP16/BF16 Tensor Core throughput
+    # 312e12
     A40_PEAK_TFLOPS = 312.0
     peak_flops_per_sec = A40_PEAK_TFLOPS * 1e12 * n_gpus
 
