@@ -337,7 +337,9 @@ def arnav_compute_mfu_from_configs(
     n_gpus: int,
     grad_accum_steps: int,
     peak_tflops_per_gpu: float,
+    batch_size : int,
     include_attention: bool = True,
+    
     
 ):
    
@@ -362,6 +364,7 @@ def arnav_compute_mfu_from_configs(
 
     # Account for gradient accumulation
     # flops_per_iter = flops_per_fwdbwd * grad_accum_steps
+    flops_per_fwdbwd = grad_accum_steps * batch_size
     flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
     print('flops_per_iter')
 

@@ -868,6 +868,8 @@ else:
                 n_gpus = 2
                 print("active->", active)
 
+                
+
                 mfu_pct = arnav_compute_mfu_from_configs(
                     dt_ms=dt,
                     n_params_active=active,
@@ -876,7 +878,9 @@ else:
                     n_gpus=n_gpus,
                     grad_accum_steps=grad_accum_steps,
                     peak_tflops_per_gpu=312,  # e.g. T4 ≈ 65 TFLOPS (fp16)
+                    batch_size = TrainingConfig.batch_size,
                     include_attention=True,
+                    
                     
                 )
 
