@@ -340,31 +340,9 @@ def arnav_compute_mfu_from_configs(
     include_attention: bool = True,
     
 ):
-    """
-    Compute Model FLOPs Utilization (MFU) as a percentage.
+   
 
-    Parameters
-    ----------
-    dt : float
-        Wall-clock time per iteration (seconds)
-    n_params_active : int
-        Number of *active* model parameters
-    model_cfg : object
-        ModelConfig (must have n_layer, n_head, n_embd, block_size)
-    training_cfg : object
-        TrainingConfig (must have grad_accum_steps)
-    n_gpus : int
-        Number of GPUs used
-    peak_tflops_per_gpu : float
-        Peak TFLOPS per GPU (bf16/fp16 as applicable)
-    include_attention : bool
-        Whether to include attention FLOPs (default: True)
-
-    Returns
-    -------
-    float
-        MFU percentage (0–100)
-    """
+    print('calling arnav_compute_mfu_from_configs()')
 
     dt = dt_ms / 1000.0
 
@@ -383,13 +361,15 @@ def arnav_compute_mfu_from_configs(
     flops_per_fwdbwd = flops_per_token * T
 
     # Account for gradient accumulation
-    flops_per_iter = flops_per_fwdbwd * grad_accum_steps
+    # flops_per_iter = flops_per_fwdbwd * grad_accum_steps
+    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+    print('flops_per_iter')
 
     # Achieved FLOPs/sec
     flops_achieved = flops_per_iter / dt
 
     # Theoretical peak FLOPs/sec
-    flops_peak = peak_tflops_per_gpu * 1e12 * n_gpus
+    flops_peak = peak_tflops_per_gpu * 1e12 
 
     # MFU
     mfu = flops_achieved / flops_peak

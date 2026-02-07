@@ -902,14 +902,7 @@ else:
 
 
 
-                # print(
-                #     f"step: {iter} | "
-                #     f"loss:{loss.item()*grad_accum_steps:.4f} | "
-                #     f"dt:{dt:.2f}ms | "
-                #     f"tok/s:{tokens_per_sec:,.0f} | "
-                #     f"MFU:{mfu:.2f}% | "
-                #     f"GPU RAM:{mem/1024**3:.2f}GB"
-                # )
+                
                 if use_wandb:
                     log_data = {
                     "train/loss": loss.detach() * grad_accum_steps,  # Tensor for graph
